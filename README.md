@@ -88,18 +88,23 @@ shows a clear *feed offline* state instead of hanging.
 
 ## 🚀 Deploy
 
-```bash
-# GitHub (source of truth)
-git push origin main
+Push to `main` on GitHub. A GitHub Action (`sync-to-space.yml`) mirrors the tree to
+the Hugging Face Space and Docker rebuilds from that upload.
 
-# Hugging Face Space (triggers a Docker rebuild)
-git push space main
+```bash
+git push origin main
 ```
 
-Add the Space remote once:
+One-time setup: create a Hugging Face **write** token that can update
+`PRIYAREDDDY-CSE/hyderabad-urban-intelligence-api`, then add it as the GitHub
+secret `HF_TOKEN` on this repo. The token must belong to an account that already
+has write access on that Space (Priya, or a collaborator she added).
+
+Manual Space push still works if you need it:
 
 ```bash
 git remote add space https://huggingface.co/spaces/PRIYAREDDDY-CSE/hyderabad-urban-intelligence-api
+git push space main
 ```
 
 Hardware: **CPU basic**. A GPU is not required for these model sizes.
