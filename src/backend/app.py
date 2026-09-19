@@ -141,6 +141,65 @@ def insert_with_schema_fallback(table, body, optional_keys, prefer="return=repre
         )
 
 
+def known_vehicle_routes():
+    """Map configured bus_id to route_id, or None when the catalog is absent."""
+    rows = optional_supabase_rows(
+        "fleet_vehicles",
+        params={"select": "bus_id,route_id", "active": "eq.true"},
+    )
+    if rows is None:
+        return None
+    return {row["bus_id"]: row.get("route_id") for row in rows if row.get("bus_id")}
+
+
+def coerce_number(value, field, minimum, maximum):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field} must be a number")
+    if number != number or not minimum <= number <= maximum:
+        raise ValueError(f"{field} must be between {minimum} and {maximum}")
+    return number
+
+
+def build_telemetry_row(reading, catalog, observed_at):
+    """Validate one device reading into a buses row, or raise ValueError."""
+    if not isinstance(reading, dict):
+        raise ValueError("each reading must be an object")
+
+    bus_id = str(reading.get("bus_id") or "").strip()
+    if not bus_id:
+        raise ValueError("bus_id is required")
+    if catalog is not None and bus_id not in catalog:
+        raise ValueError(f"{bus_id} is not a configured vehicle")
+
+    row = {
+        "bus_id": bus_id,
+        "latitude": coerce_number(reading.get("latitude"), "latitude", -90, 90),
+        "longitude": coerce_number(reading.get("longitude"), "longitude", -180, 180),
+        "recorded_at": observed_at,
+    }
+
+    route_id = reading.get("route_id") or (catalog or {}).get(bus_id)
+    if route_id:
+        row["route_id"] = route_id
+    if reading.get("speed") is not None:
+        row["speed"] = coerce_number(reading.get("speed"), "speed", 0, 200)
+    if reading.get("heading") is not None:
+        row["heading"] = coerce_number(reading.get("heading"), "heading", 0, 360)
+
+    # Operational status is only stored when the device reports it, so the UI
+    # keeps showing UNKNOWN instead of assuming a bus is in service.
+    status = reading.get("status")
+    if status is not None:
+        status = str(status).strip().upper()
+        if not status or len(status) > 32:
+            raise ValueError("status must be 1-32 characters")
+        row["status"] = status
+
+    return row
+
+
 def map_incident(row):
     return {
         "id": row.get("incident_id") or str(row.get("id")),
@@ -1097,6 +1156,63 @@ def fleet():
             "status": "offline",
             "error": "Could not load fleet telemetry from Supabase",
         }), 503
+
+
+@app.route("/api/fleet/telemetry", methods=["POST"])
+def ingest_fleet_telemetry():
+    expected_token = (os.getenv("FLEET_INGEST_TOKEN") or "").strip()
+    if not expected_token:
+        return jsonify({
+            "error": "Telemetry ingestion is disabled until FLEET_INGEST_TOKEN is set",
+        }), 503
+    if request.headers.get("X-Ingest-Token", "") != expected_token:
+        return jsonify({"error": "Invalid ingestion token"}), 401
+
+    payload = request.get_json(silent=True)
+    readings = payload if isinstance(payload, list) else [payload]
+    if not readings or payload is None:
+        return jsonify({"error": "Send a reading object or a list of readings"}), 400
+    if len(readings) > 200:
+        return jsonify({"error": "Send at most 200 readings per request"}), 400
+
+    try:
+        catalog = known_vehicle_routes()
+    except Exception as exc:
+        print("TELEMETRY CATALOG ERROR:", repr(exc))
+        return jsonify({"error": "Could not read the vehicle catalog"}), 503
+
+    observed_at = datetime.now(timezone.utc).isoformat()
+    rows = []
+    for index, reading in enumerate(readings):
+        try:
+            rows.append(build_telemetry_row(reading, catalog, observed_at))
+        except ValueError as exc:
+            return jsonify({"error": f"reading {index}: {exc}"}), 400
+
+    # PostgREST rejects a batch whose objects have differing key sets, so pad
+    # every row with the optional fields the others reported.
+    columns = {column for row in rows for column in row}
+    rows = [
+        {column: row.get(column) for column in columns}
+        for row in rows
+    ]
+
+    try:
+        supabase_request(
+            "POST",
+            "buses",
+            json_body=rows,
+            prefer="return=minimal",
+        )
+    except Exception as exc:
+        print("TELEMETRY INSERT ERROR:", repr(exc))
+        return jsonify({"error": "Could not store telemetry in Supabase"}), 503
+
+    return jsonify({
+        "status": "accepted",
+        "accepted": len(rows),
+        "recorded_at": observed_at,
+    }), 201
 
 
 @app.route("/api/demand-forecast")

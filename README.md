@@ -41,6 +41,7 @@ and the first inference pays the warm-up cost.
 | `GET` | `/api/traffic` | Live TomTom flow: speed, free-flow speed, congestion score + level |
 | `GET` | `/api/traffic-history` | Stored `traffic_realtime` rows from Supabase |
 | `GET` | `/api/fleet` | Supabase bus positions, speeds, routes and telemetry freshness |
+| `POST` | `/api/fleet/telemetry` | Ingest GPS readings for configured vehicles (token protected) |
 | `GET` | `/api/demand-forecast` | Rolling one-hour demand proxy from Supabase `vehicle_density` history |
 | `GET` | `/api/overview` | Aggregated service, fleet, model and alert status |
 | `GET` | `/api/routes` | Route catalog, condition coverage and gated recommendation |
@@ -97,9 +98,28 @@ curl https://priyaredddy-cse-hyderabad-urban-intelligence-api.hf.space/api/healt
 | `TOMTOM_API_KEY` | for `/api/traffic` | Set as a **Space secret**, never commit it |
 | `SUPABASE_URL` | for `/api/traffic-history` | Project URL, e.g. `https://xxxx.supabase.co` |
 | `SUPABASE_SECRET_KEY` | for traffic history, alerts, incidents | Service role / secret key — **never** put this in the frontend |
+| `FLEET_INGEST_TOKEN` | for `/api/fleet/telemetry` | Shared secret for GPS devices. Ingestion returns 503 while unset, so the endpoint is never open |
 
 On Hugging Face: *Space → Settings → Variables and secrets → New secret*. Locally, drop it in a
 gitignored `.env` — `python-dotenv` picks it up automatically.
+
+## 🛰️ Sending fleet telemetry
+
+`/api/fleet` reports `live` only when a vehicle reported within the last five minutes. Positions
+have to be pushed in; nothing generates them. Post one reading or a batch of up to 200:
+
+```bash
+curl -X POST https://<space>.hf.space/api/fleet/telemetry \
+  -H "X-Ingest-Token: $FLEET_INGEST_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '[{"bus_id":"HYD-BUS-001","latitude":17.3850,"longitude":78.4867,"speed":24,"heading":90,"status":"ACTIVE"}]'
+```
+
+- `bus_id`, `latitude` and `longitude` are required; `bus_id` must exist in `fleet_vehicles`.
+- `route_id` is taken from the vehicle catalog when omitted.
+- `speed`, `heading` and `status` are optional. Status is stored only when reported, so the UI
+  shows `UNKNOWN` rather than assuming a bus is in service.
+- Readings are appended, so `/api/fleet` always reads the newest row per vehicle.
 
 Without the key, `/api/traffic` returns `{"error": "TomTom API key not found"}` and the frontend
 shows a clear *feed offline* state instead of hanging.

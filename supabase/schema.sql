@@ -147,6 +147,22 @@ create index if not exists vehicle_density_route_recorded_idx
 create index if not exists incidents_route_timestamp_idx
   on public.incidents (route_id, timestamp desc);
 
+-- Declared for fresh projects; existing installations already have this table.
+create table if not exists public.buses (
+  id bigserial primary key,
+  bus_id text not null,
+  route_id text,
+  latitude double precision,
+  longitude double precision,
+  speed numeric,
+  heading numeric,
+  status text,
+  recorded_at timestamptz not null default now()
+);
+
+create index if not exists buses_bus_recorded_idx
+  on public.buses (bus_id, recorded_at desc);
+
 alter table public.fleet_routes enable row level security;
 alter table public.fleet_vehicles enable row level security;
 alter table public.route_conditions enable row level security;
