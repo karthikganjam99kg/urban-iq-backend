@@ -1103,7 +1103,8 @@ def traffic_simulation(vehicle_count):
         if (now - stamp).total_seconds() <= 600
     ]
     if recent_counts:
-        baseline_count = round(sum(recent_counts) / len(recent_counts), 1)
+        # Vehicles are whole objects, so the mean is reported as a count.
+        baseline_count = round(sum(recent_counts) / len(recent_counts))
         baseline = {
             "status": "live",
             "vehicle_count": baseline_count,
@@ -1111,10 +1112,10 @@ def traffic_simulation(vehicle_count):
         }
     elif observations:
         newest_stamp, newest_count = max(observations, key=lambda item: item[0])
-        baseline_count = newest_count
+        baseline_count = round(newest_count)
         baseline = {
             "status": "stale",
-            "vehicle_count": newest_count,
+            "vehicle_count": baseline_count,
             "sample_size": 1,
             "age_minutes": round((now - newest_stamp).total_seconds() / 60),
         }
