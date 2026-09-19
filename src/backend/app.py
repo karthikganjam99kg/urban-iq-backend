@@ -486,6 +486,8 @@ def persist_vehicle_density(bus_id, route_id, person_count, vehicle_count):
         return
     body = {
         "bus_id": bus_id,
+        # frame is NOT NULL; a still upload is a single frame.
+        "frame": 0,
         "person_count": person_count,
         "vehicle_count": vehicle_count,
         "bus_count": 0,
@@ -1062,6 +1064,14 @@ def fetch_overview():
 
 
 def traffic_simulation(vehicle_count):
+    """
+    Score a what-if vehicle count against the live traffic snapshot.
+
+    The score itself only needs the measured road speed, so the simulation runs
+    whenever that snapshot is fresh. Observed vehicle density is an optional
+    side-by-side comparison and carries its own status rather than blocking the
+    scenario, so a stale camera history never presents as a stale forecast.
+    """
     traffic = latest_traffic_snapshot()
     if not traffic or traffic["status"] != "live":
         return {
@@ -1079,18 +1089,39 @@ def traffic_simulation(vehicle_count):
         },
     )
     now = datetime.now(timezone.utc)
-    recent_counts = []
+    observations = []
     for row in density_rows:
         stamp = parse_timestamp(row.get("recorded_at"))
-        if stamp and (now - stamp.astimezone(timezone.utc)).total_seconds() <= 600:
-            recent_counts.append(float(row.get("vehicle_count") or 0))
-    if not recent_counts:
-        return {
-            "status": "collecting",
-            "error": "Recent vehicle-density observations are required.",
-        }, 409
+        if stamp:
+            observations.append(
+                (stamp.astimezone(timezone.utc), float(row.get("vehicle_count") or 0))
+            )
 
-    baseline_count = round(sum(recent_counts) / len(recent_counts), 1)
+    recent_counts = [
+        count
+        for stamp, count in observations
+        if (now - stamp).total_seconds() <= 600
+    ]
+    if recent_counts:
+        baseline_count = round(sum(recent_counts) / len(recent_counts), 1)
+        baseline = {
+            "status": "live",
+            "vehicle_count": baseline_count,
+            "sample_size": len(recent_counts),
+        }
+    elif observations:
+        newest_stamp, newest_count = max(observations, key=lambda item: item[0])
+        baseline_count = newest_count
+        baseline = {
+            "status": "stale",
+            "vehicle_count": newest_count,
+            "sample_size": 1,
+            "age_minutes": round((now - newest_stamp).total_seconds() / 60),
+        }
+    else:
+        baseline_count = None
+        baseline = {"status": "missing"}
+
     predicted_score = calculate_congestion(
         vehicle_count,
         float(traffic.get("current_speed") or 0),
@@ -1107,6 +1138,7 @@ def traffic_simulation(vehicle_count):
         "status": "live",
         "vehicles": vehicle_count,
         "baseline_vehicle_count": baseline_count,
+        "baseline": baseline,
         "current_score": traffic.get("congestion_score"),
         "score": predicted_score,
         "level": level,
@@ -1365,7 +1397,9 @@ def vehicle_detect():
                 })
 
     persist_vehicle_density(
-        request.form.get("bus_id"),
+        # Stills uploaded from the console are real observations but come from an
+        # operator device rather than a bus camera, so they are labelled as such.
+        request.form.get("bus_id") or "OPERATOR-UPLOAD",
         request.form.get("route_id"),
         person_count,
         len(vehicles),
