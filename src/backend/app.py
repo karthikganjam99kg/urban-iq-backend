@@ -1231,11 +1231,14 @@ def ingest_fleet_telemetry():
     ]
 
     try:
+        # buses holds one row per vehicle (bus_id is unique), so repeat readings
+        # from the same device update that row instead of colliding with it.
         supabase_request(
             "POST",
             "buses",
+            params={"on_conflict": "bus_id"},
             json_body=rows,
-            prefer="return=minimal",
+            prefer="resolution=merge-duplicates,return=minimal",
         )
     except Exception as exc:
         print("TELEMETRY INSERT ERROR:", repr(exc))

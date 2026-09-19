@@ -150,7 +150,8 @@ create index if not exists incidents_route_timestamp_idx
 -- Declared for fresh projects; existing installations already have this table.
 create table if not exists public.buses (
   id bigserial primary key,
-  bus_id text not null,
+  -- One row per vehicle: telemetry upserts the latest position on this key.
+  bus_id text not null unique,
   route_id text,
   latitude double precision,
   longitude double precision,
