@@ -85,10 +85,15 @@ curl https://priyaredddy-cse-hyderabad-urban-intelligence-api.hf.space/api/healt
   pothole, and waterlogging observations no older than 15 minutes.
 - **Fitness ownership** — only active, verified `fitness_routes` and `sports_facilities` rows are
   returned. The traffic safety overlay is withheld when its latest snapshot is older than 10 minutes.
-- **Simulation baseline** — scenarios require both traffic and vehicle-density observations from
-  the last 10 minutes. No fallback traffic score or vehicle count is used.
+- **Simulation baseline** — scenarios require a traffic snapshot from the last 10 minutes, since
+  the score is derived from the measured road speed. No fallback traffic score is used. The
+  observed vehicle-density comparison is optional and reports its own `baseline.status` of `live`
+  (within 10 minutes), `stale` (older, with `age_minutes`), or `missing`, so a quiet camera
+  history never blocks a scenario or presents as a fresh count.
 - **Detection ingestion** — vehicle, pothole, and garbage endpoints accept optional `bus_id` and
   `route_id` multipart fields. These links let detections accumulate route and demand evidence.
+  Vehicle stills posted without a `bus_id` are stored as `OPERATOR-UPLOAD`, which keeps operator
+  captures out of per-vehicle fleet views while still recording a real observation.
 - **CORS open** — the Vercel frontend calls this from another origin.
 
 ## 🔑 Secrets
