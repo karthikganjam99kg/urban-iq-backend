@@ -13,6 +13,14 @@ from datetime import datetime
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(PROJECT_ROOT))
 
+# Local development reads secrets from .env; hosted runs use platform secrets.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(PROJECT_ROOT / ".env")
+except ImportError:
+    pass
+
 # Serverless / Space filesystems: keep ML caches on writable tmp.
 if os.getenv("VERCEL") or os.getenv("SPACE_ID"):
     os.environ.setdefault("YOLO_CONFIG_DIR", "/tmp/Ultralytics")
