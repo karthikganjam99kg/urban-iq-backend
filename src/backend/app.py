@@ -5,7 +5,8 @@ import requests
 import uuid
 import time
 import tempfile
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timezone
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(PROJECT_ROOT))
@@ -293,6 +294,207 @@ def fetch_traffic_history(limit=30):
         return []
 
 
+def parse_timestamp(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def linear_demand_prediction(points, horizon_minutes=60):
+    """Fit a small rolling linear model to minute-level YOLO person counts."""
+    first_time = points[0][0]
+    x_values = [(stamp - first_time).total_seconds() / 60 for stamp, _ in points]
+    y_values = [count for _, count in points]
+    x_mean = sum(x_values) / len(x_values)
+    y_mean = sum(y_values) / len(y_values)
+    denominator = sum((value - x_mean) ** 2 for value in x_values)
+    slope = (
+        sum(
+            (x_value - x_mean) * (y_value - y_mean)
+            for x_value, y_value in zip(x_values, y_values)
+        )
+        / denominator
+        if denominator
+        else 0
+    )
+    intercept = y_mean - slope * x_mean
+    target_x = x_values[-1] + horizon_minutes
+    prediction = max(0, min(100, intercept + slope * target_x))
+
+    total_variance = sum((value - y_mean) ** 2 for value in y_values)
+    residual_variance = sum(
+        (y_value - (intercept + slope * x_value)) ** 2
+        for x_value, y_value in zip(x_values, y_values)
+    )
+    fit_score = (
+        max(0, 1 - (residual_variance / total_variance))
+        if total_variance
+        else 0.5
+    )
+    return prediction, fit_score
+
+
+def demand_level(score):
+    if score >= 80:
+        return "HIGH"
+    if score >= 50:
+        return "MODERATE"
+    return "LOW"
+
+
+def fetch_demand_forecast():
+    """
+    Build a demand proxy from YOLO person counts.
+
+    A forecast is withheld until there are at least six minute buckets spanning
+    30 minutes and the latest observation is recent. This prevents a demo-sized
+    frame burst from being presented as a trained passenger forecast.
+    """
+    rows = supabase_request(
+        "GET",
+        "vehicle_density",
+        params={
+            "select": "bus_id,person_count,vehicle_count,recorded_at,source",
+            "order": "recorded_at.desc",
+            "limit": "1000",
+        },
+    )
+    buses = supabase_request(
+        "GET",
+        "buses",
+        params={"select": "bus_id,route_id,status", "limit": "500"},
+    )
+    route_by_bus = {
+        row.get("bus_id"): row.get("route_id") or "Unassigned"
+        for row in buses
+    }
+
+    minute_values = defaultdict(list)
+    valid_stamps = []
+    for row in rows:
+        stamp = parse_timestamp(row.get("recorded_at"))
+        bus_id = row.get("bus_id")
+        if not stamp or not bus_id:
+            continue
+        stamp = stamp.astimezone(timezone.utc)
+        minute = stamp.replace(second=0, microsecond=0)
+        minute_values[(bus_id, minute)].append(float(row.get("person_count") or 0))
+        valid_stamps.append(stamp)
+
+    now = datetime.now(timezone.utc)
+    grouped_by_bus = defaultdict(list)
+    for (bus_id, minute), values in minute_values.items():
+        grouped_by_bus[bus_id].append((minute, sum(values) / len(values)))
+
+    route_forecasts = []
+    for bus_id, points in grouped_by_bus.items():
+        points.sort(key=lambda item: item[0])
+        coverage_minutes = (
+            (points[-1][0] - points[0][0]).total_seconds() / 60
+            if len(points) > 1
+            else 0
+        )
+        age_minutes = max(0, (now - points[-1][0]).total_seconds() / 60)
+        ready = len(points) >= 6 and coverage_minutes >= 30 and age_minutes <= 30
+        route = route_by_bus.get(bus_id, "Unassigned")
+        if ready:
+            predicted_people, fit_score = linear_demand_prediction(points)
+            confidence = round(
+                min(
+                    95,
+                    45
+                    + min(20, len(points) * 2)
+                    + min(15, coverage_minutes / 4)
+                    + fit_score * 15,
+                )
+            )
+            score = round(min(100, predicted_people))
+            route_forecasts.append(
+                {
+                    "bus_id": bus_id,
+                    "route_id": route,
+                    "predicted_people": round(predicted_people),
+                    "demand_score": score,
+                    "demand_level": demand_level(score),
+                    "confidence": confidence,
+                    "observations": len(points),
+                    "coverage_minutes": round(coverage_minutes, 1),
+                    "status": "live",
+                }
+            )
+        else:
+            route_forecasts.append(
+                {
+                    "bus_id": bus_id,
+                    "route_id": route,
+                    "status": "collecting",
+                    "observations": len(points),
+                    "coverage_minutes": round(coverage_minutes, 1),
+                    "last_seen_minutes_ago": round(age_minutes, 1),
+                }
+            )
+
+    live_routes = [
+        forecast for forecast in route_forecasts if forecast["status"] == "live"
+    ]
+    latest_stamp = max(valid_stamps).isoformat() if valid_stamps else None
+    quality = {
+        "raw_frames": len(rows),
+        "minute_buckets": len(minute_values),
+        "buses_observed": len(grouped_by_bus),
+        "latest_observation": latest_stamp,
+        "minimum_required": "6 minute buckets over 30 minutes; latest within 30 minutes",
+        "signal": "YOLO person_count demand proxy",
+    }
+
+    if not live_routes:
+        return {
+            "status": "collecting",
+            "model": "rolling-linear-demand-v1",
+            "message": (
+                "Not enough recent temporal coverage for a trustworthy forecast."
+            ),
+            "data_quality": quality,
+            "routes": route_forecasts,
+            "generated_at": now.isoformat(),
+        }
+
+    total_weight = sum(max(1, row["observations"]) for row in live_routes)
+    predicted_people = round(
+        sum(row["predicted_people"] * row["observations"] for row in live_routes)
+        / total_weight
+    )
+    confidence = round(
+        sum(row["confidence"] * row["observations"] for row in live_routes)
+        / total_weight
+    )
+    demand_score = round(
+        sum(row["demand_score"] * row["observations"] for row in live_routes)
+        / total_weight
+    )
+    return {
+        "status": "live",
+        "model": "rolling-linear-demand-v1",
+        "predicted_people": predicted_people,
+        "demand_score": demand_score,
+        "demand_level": demand_level(demand_score),
+        "confidence": confidence,
+        "recommendation": (
+            "Increase fleet capacity on high-demand routes."
+            if demand_score >= 80
+            else "Current fleet capacity is adequate; continue monitoring."
+        ),
+        "data_quality": quality,
+        "routes": sorted(
+            live_routes, key=lambda row: row["demand_score"], reverse=True
+        ),
+        "generated_at": now.isoformat(),
+    }
+
+
 def calculate_congestion(vehicle_count, average_speed):
     """
     Calculate traffic congestion score from 0 to 100.
@@ -323,6 +525,20 @@ def get_alerts():
     except Exception as exc:
         print("ALERTS ERROR:", repr(exc))
         return jsonify({"error": "Could not load alerts"}), 503
+
+
+@app.route("/api/demand-forecast")
+def demand_forecast():
+    try:
+        return jsonify(fetch_demand_forecast())
+    except Exception as exc:
+        print("DEMAND FORECAST ERROR:", repr(exc))
+        return jsonify({
+            "status": "offline",
+            "error": "Could not build demand forecast from Supabase data",
+        }), 503
+
+
 # -----------------------------------
 # HOME
 # -----------------------------------

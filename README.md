@@ -40,6 +40,7 @@ and the first inference pays the warm-up cost.
 | `GET` | `/api/health` | Service status + which models are resident |
 | `GET` | `/api/traffic` | Live TomTom flow: speed, free-flow speed, congestion score + level |
 | `GET` | `/api/traffic-history` | Stored `traffic_realtime` rows from Supabase |
+| `GET` | `/api/demand-forecast` | Rolling one-hour demand proxy from Supabase `vehicle_density` history |
 | `GET` | `/api/alerts` | Civic alerts from Supabase `alerts` |
 | `GET` | `/api/incidents` | Incident records from Supabase `incidents` |
 | `POST` | `/api/pothole-detect` | Boxed potholes with confidence (multipart upload) |
@@ -70,6 +71,8 @@ curl https://priyaredddy-cse-hyderabad-urban-intelligence-api.hf.space/api/healt
   `TORCH_HOME` and `MPLCONFIGDIR` are redirected to `/tmp`, because the app directory can be
   read-only.
 - **Single worker, threaded** — one Gunicorn worker with threads keeps model memory to one copy.
+- **Honest demand gating** — the rolling demand model only forecasts when it has at least six
+  recent minute buckets spanning 30 minutes; otherwise it reports `collecting`.
 - **CORS open** — the Vercel frontend calls this from another origin.
 
 ## 🔑 Secrets
