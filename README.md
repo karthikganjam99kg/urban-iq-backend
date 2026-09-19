@@ -40,7 +40,12 @@ and the first inference pays the warm-up cost.
 | `GET` | `/api/health` | Service status + which models are resident |
 | `GET` | `/api/traffic` | Live TomTom flow: speed, free-flow speed, congestion score + level |
 | `GET` | `/api/traffic-history` | Stored `traffic_realtime` rows from Supabase |
+| `GET` | `/api/fleet` | Supabase bus positions, speeds, routes and telemetry freshness |
 | `GET` | `/api/demand-forecast` | Rolling one-hour demand proxy from Supabase `vehicle_density` history |
+| `GET` | `/api/overview` | Aggregated service, fleet, model and alert status |
+| `GET` | `/api/routes` | Route catalog, condition coverage and gated recommendation |
+| `GET` | `/api/fitness` | Verified fitness routes/facilities with live traffic safety |
+| `POST` | `/api/traffic-simulation` | Scenario calculated from recent traffic and vehicle-density data |
 | `GET` | `/api/alerts` | Civic alerts from Supabase `alerts` |
 | `GET` | `/api/incidents` | Incident records from Supabase `incidents` |
 | `POST` | `/api/pothole-detect` | Boxed potholes with confidence (multipart upload) |
@@ -73,6 +78,16 @@ curl https://priyaredddy-cse-hyderabad-urban-intelligence-api.hf.space/api/healt
 - **Single worker, threaded** — one Gunicorn worker with threads keeps model memory to one copy.
 - **Honest demand gating** — the rolling demand model only forecasts when it has at least six
   recent minute buckets spanning 30 minutes; otherwise it reports `collecting`.
+- **Fleet freshness** — telemetry is `live` for five minutes, then `stale`; configured vehicles
+  without any telemetry report `missing`.
+- **Route recommendations** — a recommendation requires at least two routes with traffic,
+  pothole, and waterlogging observations no older than 15 minutes.
+- **Fitness ownership** — only active, verified `fitness_routes` and `sports_facilities` rows are
+  returned. The traffic safety overlay is withheld when its latest snapshot is older than 10 minutes.
+- **Simulation baseline** — scenarios require both traffic and vehicle-density observations from
+  the last 10 minutes. No fallback traffic score or vehicle count is used.
+- **Detection ingestion** — vehicle, pothole, and garbage endpoints accept optional `bus_id` and
+  `route_id` multipart fields. These links let detections accumulate route and demand evidence.
 - **CORS open** — the Vercel frontend calls this from another origin.
 
 ## 🔑 Secrets

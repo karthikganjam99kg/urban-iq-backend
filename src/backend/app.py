@@ -64,7 +64,6 @@ def get_plate_reader():
     return plate_reader
 
 app = Flask(__name__)
-garbage_alerts = []
 # Rash driving tracking
 previous_vehicle_positions = {}
 rash_driving_alerts = []
@@ -79,7 +78,7 @@ def save_upload(upload, prefix):
 
 def supabase_base():
     base = os.getenv("SUPABASE_URL")
-    return base.rstrip("/") if base else None
+    return base.strip().rstrip("/") if base else None
 
 
 def supabase_request(method, path, params=None, json_body=None, prefer="return=representation"):
@@ -104,6 +103,44 @@ def supabase_request(method, path, params=None, json_body=None, prefer="return=r
     return response.json()
 
 
+def optional_supabase_rows(path, params=None):
+    """Read a migration-managed table; return None until its SQL is installed."""
+    try:
+        return supabase_request("GET", path, params=params)
+    except RuntimeError as exc:
+        message = str(exc)
+        if (
+            "PGRST205" in message
+            or "PGRST204" in message
+            or "Could not find the table" in message
+        ):
+            return None
+        raise
+
+
+def insert_with_schema_fallback(table, body, optional_keys, prefer="return=representation"):
+    """Insert new-schema fields when available, then retry legacy columns."""
+    try:
+        return supabase_request(
+            "POST",
+            table,
+            json_body=body,
+            prefer=prefer,
+        )
+    except RuntimeError as exc:
+        if "PGRST204" not in str(exc):
+            raise
+        legacy_body = {
+            key: value for key, value in body.items() if key not in optional_keys
+        }
+        return supabase_request(
+            "POST",
+            table,
+            json_body=legacy_body,
+            prefer=prefer,
+        )
+
+
 def map_incident(row):
     return {
         "id": row.get("incident_id") or str(row.get("id")),
@@ -125,6 +162,10 @@ def map_alert(row):
         "severity": row.get("severity"),
         "location": row.get("location"),
         "message": row.get("message"),
+        "title": row.get("title") or f"{row.get('alert_type') or 'Civic'} alert",
+        "recommendation": row.get("recommendation"),
+        "bus_id": row.get("bus_id"),
+        "route_id": row.get("route_id"),
         "timestamp": row.get("detected_at") or row.get("created_at"),
         "status": row.get("status") or "New",
     }
@@ -148,36 +189,157 @@ def fetch_alerts():
     return [map_alert(row) for row in rows]
 
 
-def create_incident(incident_type, severity, location, description):
+def fetch_fleet():
+    telemetry_rows = supabase_request(
+        "GET",
+        "buses",
+        params={"select": "*", "order": "recorded_at.desc", "limit": "500"},
+    )
+    vehicle_rows = optional_supabase_rows(
+        "fleet_vehicles",
+        params={"select": "*", "active": "eq.true", "order": "bus_id.asc"},
+    )
+    route_rows = optional_supabase_rows(
+        "fleet_routes",
+        params={"select": "*", "active": "eq.true", "order": "route_id.asc"},
+    )
+
+    latest_by_bus = {}
+    for row in telemetry_rows:
+        bus_id = row.get("bus_id") or str(row.get("id"))
+        if bus_id not in latest_by_bus:
+            latest_by_bus[bus_id] = row
+
+    routes = {
+        row.get("route_id"): row
+        for row in (route_rows or [])
+        if row.get("route_id")
+    }
+    vehicles = {
+        row.get("bus_id"): row
+        for row in (vehicle_rows or [])
+        if row.get("bus_id")
+    }
+    all_bus_ids = sorted(set(latest_by_bus) | set(vehicles))
+
+    now = datetime.now(timezone.utc)
+    buses = []
+    latest = None
+    for bus_id in all_bus_ids:
+        row = latest_by_bus.get(bus_id, {})
+        vehicle = vehicles.get(bus_id, {})
+        recorded_at = parse_timestamp(row.get("recorded_at"))
+        if recorded_at:
+            recorded_at = recorded_at.astimezone(timezone.utc)
+            latest = max(latest, recorded_at) if latest else recorded_at
+            age_seconds = max(0, (now - recorded_at).total_seconds())
+        else:
+            age_seconds = None
+        telemetry_status = (
+            "live"
+            if age_seconds is not None and age_seconds <= 300
+            else ("stale" if recorded_at else "missing")
+        )
+        route_id = (
+            row.get("route_id")
+            or vehicle.get("route_id")
+            or "Unassigned"
+        )
+        route = routes.get(route_id, {})
+        buses.append(
+            {
+                "id": bus_id,
+                "display_name": vehicle.get("display_name") or bus_id,
+                "route_id": route_id,
+                "route_name": route.get("name") or f"Route {route_id}",
+                "origin": route.get("origin"),
+                "destination": route.get("destination"),
+                "capacity": vehicle.get("capacity"),
+                "latitude": row.get("latitude"),
+                "longitude": row.get("longitude"),
+                "speed": row.get("speed"),
+                "heading": row.get("heading"),
+                "operational_status": row.get("status") or "UNKNOWN",
+                "telemetry_status": telemetry_status,
+                "recorded_at": (
+                    recorded_at.isoformat() if recorded_at else row.get("recorded_at")
+                ),
+                "age_seconds": round(age_seconds) if age_seconds is not None else None,
+            }
+        )
+
+    status_order = {"live": 0, "stale": 1, "missing": 2}
+    buses.sort(key=lambda bus: (status_order[bus["telemetry_status"]], bus["id"]))
+    live_count = sum(bus["telemetry_status"] == "live" for bus in buses)
+    stale_count = sum(bus["telemetry_status"] == "stale" for bus in buses)
+    missing_count = sum(bus["telemetry_status"] == "missing" for bus in buses)
+    return {
+        "status": (
+            "live"
+            if live_count
+            else ("stale" if stale_count else ("missing" if buses else "empty"))
+        ),
+        "schema_ready": vehicle_rows is not None and route_rows is not None,
+        "buses": buses,
+        "summary": {
+            "total": len(buses),
+            "live": live_count,
+            "stale": stale_count,
+            "missing": missing_count,
+            "latest_observation": latest.isoformat() if latest else None,
+        },
+        "generated_at": now.isoformat(),
+    }
+
+
+def create_incident(
+    incident_type,
+    severity,
+    location,
+    description,
+    bus_id=None,
+    route_id=None,
+    recommendation=None,
+):
     incident_id = str(uuid.uuid4())
     stamp = datetime.now().isoformat()
-    rows = supabase_request(
-        "POST",
+    incident_body = {
+        "incident_id": incident_id,
+        "incident_type": incident_type,
+        "severity": severity,
+        "location": location,
+        "description": description,
+        "status": "New",
+        "timestamp": stamp,
+        "source": "UrbanIQ-api",
+    }
+    alert_body = {
+        "alert_id": str(uuid.uuid4()),
+        "incident_id": incident_id,
+        "alert_type": incident_type,
+        "severity": severity,
+        "location": location,
+        "message": description,
+        "status": "New",
+        "detected_at": stamp,
+    }
+    if bus_id:
+        incident_body["bus_id"] = bus_id
+        alert_body["bus_id"] = bus_id
+    if route_id:
+        incident_body["route_id"] = route_id
+        alert_body["route_id"] = route_id
+    if recommendation:
+        alert_body["recommendation"] = recommendation
+    rows = insert_with_schema_fallback(
         "incidents",
-        json_body={
-            "incident_id": incident_id,
-            "incident_type": incident_type,
-            "severity": severity,
-            "location": location,
-            "description": description,
-            "status": "New",
-            "timestamp": stamp,
-            "source": "UrbanIQ-api",
-        },
+        incident_body,
+        {"bus_id", "route_id"},
     )
-    supabase_request(
-        "POST",
+    insert_with_schema_fallback(
         "alerts",
-        json_body={
-            "alert_id": str(uuid.uuid4()),
-            "incident_id": incident_id,
-            "alert_type": incident_type,
-            "severity": severity,
-            "location": location,
-            "message": description,
-            "status": "New",
-            "detected_at": stamp,
-        },
+        alert_body,
+        {"bus_id", "route_id", "recommendation"},
         prefer="return=minimal",
     )
     return map_incident(rows[0] if rows else {
@@ -202,6 +364,7 @@ def supabase_headers():
     key = os.getenv("SUPABASE_SECRET_KEY")
     if not key:
         return None
+    key = key.strip()
     return {
         "apikey": key,
         "Authorization": f"Bearer {key}",
@@ -210,11 +373,11 @@ def supabase_headers():
     }
 
 
-def persist_traffic_snapshot(payload):
+def persist_traffic_snapshot(payload, route_id=None, bus_id=None):
     """Write into the existing traffic_realtime table (service role)."""
     global _last_traffic_persist
     headers = supabase_headers()
-    base = os.getenv("SUPABASE_URL")
+    base = supabase_base()
     if not headers or not base:
         return
 
@@ -242,25 +405,82 @@ def persist_traffic_snapshot(payload):
         "road_closure": payload.get("road_closure", False),
         "source": "TomTom",
     }
+    if route_id:
+        row["route_id"] = route_id
+    if bus_id:
+        row["bus_id"] = bus_id
 
     try:
-        response = requests.post(
-            f"{base.rstrip('/')}/rest/v1/traffic_realtime",
-            headers=headers,
-            json=row,
-            timeout=10,
+        insert_with_schema_fallback(
+            "traffic_realtime",
+            row,
+            {"route_id", "bus_id"},
+            prefer="return=minimal",
         )
-        if response.ok:
-            _last_traffic_persist = now
-        else:
-            print("SUPABASE TRAFFIC INSERT:", response.status_code, response.text[:200])
+        _last_traffic_persist = now
     except Exception as exc:
         print("SUPABASE TRAFFIC INSERT ERROR:", repr(exc))
 
 
+def persist_vehicle_density(bus_id, route_id, person_count, vehicle_count):
+    if not bus_id:
+        return
+    body = {
+        "bus_id": bus_id,
+        "person_count": person_count,
+        "vehicle_count": vehicle_count,
+        "bus_count": 0,
+        "congestion_level": (
+            "HIGH" if vehicle_count >= 15 else "MODERATE" if vehicle_count >= 8 else "LOW"
+        ),
+        "source": "UrbanIQ_vehicle_detect",
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if route_id:
+        body["route_id"] = route_id
+    try:
+        insert_with_schema_fallback(
+            "vehicle_density",
+            body,
+            {"route_id"},
+            prefer="return=minimal",
+        )
+    except Exception as exc:
+        print("VEHICLE DENSITY INSERT ERROR:", repr(exc))
+
+
+def persist_route_condition(
+    route_id,
+    source,
+    congestion_score=None,
+    pothole_count=None,
+    waterlogging_count=None,
+):
+    if not route_id:
+        return
+    body = {
+        "route_id": route_id,
+        "source": source,
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "congestion_score": congestion_score,
+        "pothole_count": pothole_count,
+        "waterlogging_count": waterlogging_count,
+    }
+    try:
+        supabase_request(
+            "POST",
+            "route_conditions",
+            json_body=body,
+            prefer="return=minimal",
+        )
+    except RuntimeError as exc:
+        if "PGRST205" not in str(exc):
+            print("ROUTE CONDITION INSERT ERROR:", repr(exc))
+
+
 def fetch_traffic_history(limit=30):
     headers = supabase_headers()
-    base = os.getenv("SUPABASE_URL")
+    base = supabase_base()
     if not headers or not base:
         return []
 
@@ -495,6 +715,346 @@ def fetch_demand_forecast():
     }
 
 
+def latest_traffic_snapshot():
+    rows = supabase_request(
+        "GET",
+        "traffic_realtime",
+        params={
+            "select": (
+                "congestion_score,congestion_level,current_speed,"
+                "free_flow_speed,recorded_at"
+            ),
+            "order": "recorded_at.desc",
+            "limit": "1",
+        },
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    stamp = parse_timestamp(row.get("recorded_at"))
+    age_seconds = (
+        max(0, (datetime.now(timezone.utc) - stamp).total_seconds())
+        if stamp
+        else None
+    )
+    return {
+        **row,
+        "age_seconds": round(age_seconds) if age_seconds is not None else None,
+        "status": (
+            "live"
+            if age_seconds is not None and age_seconds <= 600
+            else "stale"
+        ),
+    }
+
+
+def fetch_routes():
+    route_rows = optional_supabase_rows(
+        "fleet_routes",
+        params={"select": "*", "active": "eq.true", "order": "route_id.asc"},
+    )
+    condition_rows = optional_supabase_rows(
+        "route_conditions",
+        params={
+            "select": "*",
+            "order": "observed_at.desc",
+            "limit": "1000",
+        },
+    )
+    schema_ready = route_rows is not None and condition_rows is not None
+
+    if route_rows is None:
+        fleet = fetch_fleet()
+        route_rows = [
+            {
+                "route_id": route_id,
+                "name": route_name,
+                "origin": None,
+                "destination": None,
+            }
+            for route_id, route_name in sorted(
+                {
+                    (bus["route_id"], bus["route_name"])
+                    for bus in fleet["buses"]
+                    if bus["route_id"] != "Unassigned"
+                }
+            )
+        ]
+    condition_rows = condition_rows or []
+
+    latest_condition = {}
+    for row in condition_rows:
+        route_id = row.get("route_id")
+        if not route_id:
+            continue
+        aggregate = latest_condition.setdefault(
+            route_id,
+            {
+                "observed_at": None,
+                "congestion_score": None,
+                "congestion_observed_at": None,
+                "pothole_count": None,
+                "pothole_observed_at": None,
+                "waterlogging_count": None,
+                "waterlogging_observed_at": None,
+            },
+        )
+        if aggregate["observed_at"] is None:
+            aggregate["observed_at"] = row.get("observed_at")
+        for field in ("congestion_score", "pothole_count", "waterlogging_count"):
+            if aggregate[field] is None and row.get(field) is not None:
+                aggregate[field] = row.get(field)
+                aggregate[f"{field.split('_')[0]}_observed_at"] = row.get(
+                    "observed_at"
+                )
+
+    now = datetime.now(timezone.utc)
+    routes = []
+    for route in route_rows:
+        route_id = route.get("route_id")
+        condition = latest_condition.get(route_id)
+        observed_at = parse_timestamp(condition.get("observed_at")) if condition else None
+        signal_stamps = [
+            parse_timestamp(condition.get(field))
+            for field in (
+                "congestion_observed_at",
+                "pothole_observed_at",
+                "waterlogging_observed_at",
+            )
+        ] if condition else []
+        signal_ages = [
+            max(0, (now - stamp.astimezone(timezone.utc)).total_seconds())
+            if stamp
+            else None
+            for stamp in signal_stamps
+        ]
+        condition_status = (
+            "live"
+            if signal_ages
+            and all(age is not None and age <= 900 for age in signal_ages)
+            else ("stale" if condition else "missing")
+        )
+        routes.append(
+            {
+                "route_id": route_id,
+                "name": route.get("name") or f"Route {route_id}",
+                "origin": route.get("origin"),
+                "destination": route.get("destination"),
+                "condition_status": condition_status,
+                "congestion_score": (
+                    condition.get("congestion_score") if condition else None
+                ),
+                "pothole_count": (
+                    condition.get("pothole_count") if condition else None
+                ),
+                "waterlogging_count": (
+                    condition.get("waterlogging_count") if condition else None
+                ),
+                "observed_at": (
+                    observed_at.isoformat() if observed_at else None
+                ),
+            }
+        )
+
+    scored = []
+    for route in routes:
+        signals = (
+            route["congestion_score"],
+            route["pothole_count"],
+            route["waterlogging_count"],
+        )
+        if route["condition_status"] != "live" or any(
+            value is None for value in signals
+        ):
+            continue
+        score = min(
+            100,
+            float(route["congestion_score"])
+            + int(route["pothole_count"]) * 10
+            + int(route["waterlogging_count"]) * 15,
+        )
+        scored.append({**route, "score": round(score, 1)})
+    scored.sort(key=lambda row: row["score"])
+
+    return {
+        "status": (
+            "live"
+            if len(scored) >= 2
+            else ("collecting" if schema_ready else "schema_required")
+        ),
+        "schema_ready": schema_ready,
+        "routes": routes,
+        "recommended": scored[0] if len(scored) >= 2 else None,
+        "alternatives": scored[1:] if len(scored) >= 2 else [],
+        "message": (
+            None
+            if len(scored) >= 2
+            else "At least two routes need fresh traffic, pothole, and waterlogging signals."
+        ),
+        "generated_at": now.isoformat(),
+    }
+
+
+def fetch_fitness():
+    route_rows = optional_supabase_rows(
+        "fitness_routes",
+        params={
+            "select": "*",
+            "active": "eq.true",
+            "verified": "eq.true",
+            "order": "activity_type.asc",
+        },
+    )
+    facility_rows = optional_supabase_rows(
+        "sports_facilities",
+        params={
+            "select": "*",
+            "active": "eq.true",
+            "verified": "eq.true",
+            "order": "name.asc",
+        },
+    )
+    traffic = latest_traffic_snapshot()
+    traffic_live = bool(traffic and traffic["status"] == "live")
+    if traffic_live:
+        score = float(traffic.get("congestion_score") or 0)
+        safety = "SAFE" if score < 60 else "CAUTION"
+    else:
+        safety = "NO DATA"
+
+    routes = [
+        {
+            "id": row.get("id"),
+            "route_code": row.get("route_code"),
+            "name": row.get("name"),
+            "activity_type": row.get("activity_type"),
+            "distance_km": row.get("distance_km"),
+            "duration_minutes": row.get("duration_minutes"),
+            "latitude": row.get("latitude"),
+            "longitude": row.get("longitude"),
+            "safety": safety,
+            "traffic_status": traffic.get("status") if traffic else "empty",
+            "congestion_score": (
+                traffic.get("congestion_score") if traffic_live else None
+            ),
+        }
+        for row in (route_rows or [])
+    ]
+    facilities = [
+        {
+            "id": row.get("id"),
+            "facility_code": row.get("facility_code"),
+            "name": row.get("name"),
+            "facility_type": row.get("facility_type"),
+            "activities": row.get("activities") or [],
+            "latitude": row.get("latitude"),
+            "longitude": row.get("longitude"),
+        }
+        for row in (facility_rows or [])
+    ]
+    schema_ready = route_rows is not None and facility_rows is not None
+    return {
+        "status": (
+            "live"
+            if schema_ready and (routes or facilities)
+            else ("empty" if schema_ready else "schema_required")
+        ),
+        "schema_ready": schema_ready,
+        "traffic": traffic,
+        "routes": routes,
+        "facilities": facilities,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def fetch_overview():
+    fleet_data = fetch_fleet()
+    traffic = latest_traffic_snapshot()
+    demand = fetch_demand_forecast()
+    alerts = fetch_alerts()
+    model_paths = {
+        "vehicle": PROJECT_ROOT / "yolo11n.pt",
+        "garbage": PROJECT_ROOT / "src" / "garbage_ai" / "best.pt",
+        "pothole": PROJECT_ROOT / "weights" / "pothole2v.pt",
+    }
+    models = {name: path.is_file() for name, path in model_paths.items()}
+    services = {
+        "fleet": fleet_data["status"],
+        "traffic": traffic["status"] if traffic else "empty",
+        "vision": "live" if all(models.values()) else "degraded",
+        "demand": demand["status"],
+    }
+    critical_healthy = (
+        services["fleet"] == "live"
+        and services["traffic"] == "live"
+        and services["vision"] == "live"
+    )
+    return {
+        "status": "operational" if critical_healthy else "degraded",
+        "services": services,
+        "models": models,
+        "fleet": fleet_data["summary"],
+        "active_alerts": sum(
+            str(alert.get("status", "")).lower() not in {"resolved", "closed"}
+            for alert in alerts
+        ),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def traffic_simulation(vehicle_count):
+    traffic = latest_traffic_snapshot()
+    if not traffic or traffic["status"] != "live":
+        return {
+            "status": "offline",
+            "error": "A recent traffic snapshot is required.",
+        }, 409
+
+    density_rows = supabase_request(
+        "GET",
+        "vehicle_density",
+        params={
+            "select": "vehicle_count,recorded_at",
+            "order": "recorded_at.desc",
+            "limit": "100",
+        },
+    )
+    now = datetime.now(timezone.utc)
+    recent_counts = []
+    for row in density_rows:
+        stamp = parse_timestamp(row.get("recorded_at"))
+        if stamp and (now - stamp.astimezone(timezone.utc)).total_seconds() <= 600:
+            recent_counts.append(float(row.get("vehicle_count") or 0))
+    if not recent_counts:
+        return {
+            "status": "collecting",
+            "error": "Recent vehicle-density observations are required.",
+        }, 409
+
+    baseline_count = round(sum(recent_counts) / len(recent_counts), 1)
+    predicted_score = calculate_congestion(
+        vehicle_count,
+        float(traffic.get("current_speed") or 0),
+    )
+    if predicted_score < 30:
+        level = "Low"
+    elif predicted_score < 60:
+        level = "Moderate"
+    elif predicted_score < 80:
+        level = "High"
+    else:
+        level = "Severe"
+    return {
+        "status": "live",
+        "vehicles": vehicle_count,
+        "baseline_vehicle_count": baseline_count,
+        "current_score": traffic.get("congestion_score"),
+        "score": predicted_score,
+        "level": level,
+        "generated_at": now.isoformat(),
+    }, 200
+
+
 def calculate_congestion(vehicle_count, average_speed):
     """
     Calculate traffic congestion score from 0 to 100.
@@ -527,6 +1087,18 @@ def get_alerts():
         return jsonify({"error": "Could not load alerts"}), 503
 
 
+@app.route("/api/fleet")
+def fleet():
+    try:
+        return jsonify(fetch_fleet())
+    except Exception as exc:
+        print("FLEET ERROR:", repr(exc))
+        return jsonify({
+            "status": "offline",
+            "error": "Could not load fleet telemetry from Supabase",
+        }), 503
+
+
 @app.route("/api/demand-forecast")
 def demand_forecast():
     try:
@@ -536,6 +1108,62 @@ def demand_forecast():
         return jsonify({
             "status": "offline",
             "error": "Could not build demand forecast from Supabase data",
+        }), 503
+
+
+@app.route("/api/overview")
+def overview():
+    try:
+        return jsonify(fetch_overview())
+    except Exception as exc:
+        print("OVERVIEW ERROR:", repr(exc))
+        return jsonify({
+            "status": "offline",
+            "error": "Could not build the operations overview",
+        }), 503
+
+
+@app.route("/api/routes")
+def route_catalog():
+    try:
+        return jsonify(fetch_routes())
+    except Exception as exc:
+        print("ROUTES ERROR:", repr(exc))
+        return jsonify({
+            "status": "offline",
+            "error": "Could not load route signals",
+        }), 503
+
+
+@app.route("/api/fitness")
+def fitness():
+    try:
+        return jsonify(fetch_fitness())
+    except Exception as exc:
+        print("FITNESS ERROR:", repr(exc))
+        return jsonify({
+            "status": "offline",
+            "error": "Could not load fitness routes and facilities",
+        }), 503
+
+
+@app.route("/api/traffic-simulation", methods=["POST"])
+def simulate_traffic():
+    payload = request.get_json(silent=True) or {}
+    try:
+        vehicle_count = int(payload.get("vehicle_count"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "vehicle_count must be an integer"}), 400
+    if vehicle_count < 1 or vehicle_count > 500:
+        return jsonify({"error": "vehicle_count must be between 1 and 500"}), 400
+    try:
+        result, status_code = traffic_simulation(vehicle_count)
+        return jsonify(result), status_code
+    except Exception as exc:
+        print("TRAFFIC SIMULATION ERROR:", repr(exc))
+        return jsonify({
+            "status": "offline",
+            "error": "Could not load the live simulation baseline",
         }), 503
 
 
@@ -585,6 +1213,7 @@ def vehicle_detect():
     )
 
     vehicles = []
+    person_count = 0
 
     vehicle_classes = {
         2: "car",
@@ -598,6 +1227,10 @@ def vehicle_detect():
         for box in result.boxes:
 
             class_id = int(box.cls[0])
+
+            if class_id == 0:
+                person_count += 1
+                continue
 
             if class_id in vehicle_classes:
 
@@ -615,8 +1248,15 @@ def vehicle_detect():
                     ]
                 })
 
+    persist_vehicle_density(
+        request.form.get("bus_id"),
+        request.form.get("route_id"),
+        person_count,
+        len(vehicles),
+    )
     return jsonify({
         "vehicle_count": len(vehicles),
+        "person_count": person_count,
         "vehicles": vehicles
     })
 # -----------------------------------
@@ -806,6 +1446,7 @@ def traffic():
             return jsonify({
                 "error": "TomTom API key not found"
             }), 500
+        api_key = api_key.strip()
 
         url = "https://api.tomtom.com/traffic/services/4/flowSegmentData/relative/10/json"
 
@@ -863,7 +1504,14 @@ def traffic():
             "road_closure": tomtom_data["roadClosure"],
             "data_source": "TomTom Traffic Flow"
         }
-        persist_traffic_snapshot(payload)
+        route_id = request.args.get("route_id")
+        bus_id = request.args.get("bus_id")
+        persist_traffic_snapshot(payload, route_id=route_id, bus_id=bus_id)
+        persist_route_condition(
+            route_id,
+            source="TomTom",
+            congestion_score=congestion_score,
+        )
         return jsonify(payload)
 
     except requests.exceptions.RequestException as e:
@@ -905,16 +1553,12 @@ def garbage_detect():
                     severity="Medium",
                     location="Hyderabad",
                     description=f"{len(detections)} garbage item(s) detected by AI.",
+                    bus_id=request.form.get("bus_id"),
+                    route_id=request.form.get("route_id"),
+                    recommendation="Schedule cleaning for the detected area.",
                 )
             except Exception as exc:
                 print("GARBAGE INCIDENT ERROR:", repr(exc))
-            garbage_alerts.append({
-                "id": str(uuid.uuid4()),
-                "type": "Garbage",
-                "message": f"{len(detections)} garbage object(s) detected",
-                "location": "Hyderabad",
-                "timestamp": datetime.now().isoformat()
-            })
 
         return jsonify({"detections": detections})
     except Exception as error:
@@ -943,17 +1587,35 @@ def pothole_detect():
             detections = detect_potholes(str(image_path))
             if detections:
                 severity = "High" if len(detections) >= 3 else "Medium"
+                route_id = request.form.get("route_id")
                 try:
                     create_incident(
                         incident_type="Pothole",
                         severity=severity,
                         location="Hyderabad",
-                        description=f"{len(detections)} pothole(s) detected by AI."
+                        description=f"{len(detections)} pothole(s) detected by AI.",
+                        bus_id=request.form.get("bus_id"),
+                        route_id=route_id,
+                        recommendation="Inspect and schedule road repair.",
                     )
                 except Exception as exc:
                     print("POTHOLE INCIDENT ERROR:", repr(exc))
+                persist_route_condition(
+                    route_id,
+                    source="UrbanIQ_pothole_detect",
+                    pothole_count=len(detections),
+                )
 
-            return jsonify({"detections": detections})
+            defect_count = len(detections)
+            road_risk = (
+                "HIGH"
+                if defect_count >= 3
+                else "MODERATE" if defect_count else "LOW"
+            )
+            return jsonify({
+                "detections": detections,
+                "road_risk": road_risk,
+            })
         finally:
             image_path.unlink(missing_ok=True)
 
