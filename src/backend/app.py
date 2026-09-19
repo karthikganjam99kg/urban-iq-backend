@@ -2,11 +2,8 @@ import sys
 from pathlib import Path
 import os
 import requests
-import random
 import uuid
-import json
 import time
-import shutil
 import tempfile
 from datetime import datetime
 
@@ -70,15 +67,6 @@ garbage_alerts = []
 # Rash driving tracking
 previous_vehicle_positions = {}
 rash_driving_alerts = []
-SOURCE_DATA_FILE = Path(__file__).resolve().parent / "urban_data.json"
-DATA_FILE = (
-    Path("/tmp/urban_data.json") if os.getenv("VERCEL") else SOURCE_DATA_FILE
-)
-
-
-def ensure_data_file():
-    if DATA_FILE != SOURCE_DATA_FILE and not DATA_FILE.exists():
-        shutil.copyfile(SOURCE_DATA_FILE, DATA_FILE)
 
 
 def save_upload(upload, prefix):
@@ -88,57 +76,121 @@ def save_upload(upload, prefix):
     upload.save(path)
     return Path(path)
 
-def load_data():
-    ensure_data_file()
-    if not DATA_FILE.exists():
-        return {
-            "incidents": [],
-            "alerts": [],
-            "road_conditions": [],
-            "traffic_history": []
-        }
-
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+def supabase_base():
+    base = os.getenv("SUPABASE_URL")
+    return base.rstrip("/") if base else None
 
 
-def save_data(data):
-    ensure_data_file()
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+def supabase_request(method, path, params=None, json_body=None, prefer="return=representation"):
+    headers = supabase_headers()
+    base = supabase_base()
+    if not headers or not base:
+        raise RuntimeError("Supabase is not configured")
+
+    headers = {**headers, "Prefer": prefer}
+    response = requests.request(
+        method,
+        f"{base}/rest/v1/{path.lstrip('/')}",
+        headers=headers,
+        params=params,
+        json=json_body,
+        timeout=15,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Supabase {path} {response.status_code}: {response.text[:300]}")
+    if not response.content:
+        return []
+    return response.json()
+
+
+def map_incident(row):
+    return {
+        "id": row.get("incident_id") or str(row.get("id")),
+        "type": row.get("incident_type"),
+        "severity": row.get("severity"),
+        "location": row.get("location"),
+        "description": row.get("description"),
+        "timestamp": row.get("timestamp") or row.get("created_at"),
+        "status": row.get("status") or "New",
+        "source": row.get("source"),
+    }
+
+
+def map_alert(row):
+    return {
+        "id": row.get("alert_id") or str(row.get("id")),
+        "incident_id": row.get("incident_id"),
+        "type": row.get("alert_type"),
+        "severity": row.get("severity"),
+        "location": row.get("location"),
+        "message": row.get("message"),
+        "timestamp": row.get("detected_at") or row.get("created_at"),
+        "status": row.get("status") or "New",
+    }
+
+
+def fetch_incidents():
+    rows = supabase_request(
+        "GET",
+        "incidents",
+        params={"select": "*", "order": "timestamp.desc.nullslast,created_at.desc"},
+    )
+    return [map_incident(row) for row in rows]
+
+
+def fetch_alerts():
+    rows = supabase_request(
+        "GET",
+        "alerts",
+        params={"select": "*", "order": "detected_at.desc.nullslast,created_at.desc"},
+    )
+    return [map_alert(row) for row in rows]
 
 
 def create_incident(incident_type, severity, location, description):
-    data = load_data()
-
-    incident = {
-        "id": str(uuid.uuid4()),
-        "type": incident_type,
+    incident_id = str(uuid.uuid4())
+    stamp = datetime.now().isoformat()
+    rows = supabase_request(
+        "POST",
+        "incidents",
+        json_body={
+            "incident_id": incident_id,
+            "incident_type": incident_type,
+            "severity": severity,
+            "location": location,
+            "description": description,
+            "status": "New",
+            "timestamp": stamp,
+            "source": "UrbanIQ-api",
+        },
+    )
+    supabase_request(
+        "POST",
+        "alerts",
+        json_body={
+            "alert_id": str(uuid.uuid4()),
+            "incident_id": incident_id,
+            "alert_type": incident_type,
+            "severity": severity,
+            "location": location,
+            "message": description,
+            "status": "New",
+            "detected_at": stamp,
+        },
+        prefer="return=minimal",
+    )
+    return map_incident(rows[0] if rows else {
+        "incident_id": incident_id,
+        "incident_type": incident_type,
         "severity": severity,
         "location": location,
         "description": description,
-        "timestamp": datetime.now().isoformat(),
-        "status": "New"
-    }
+        "status": "New",
+        "timestamp": stamp,
+        "source": "UrbanIQ-api",
+    })
 
-    data["incidents"].append(incident)
 
-    alert = {
-        "id": str(uuid.uuid4()),
-        "incident_id": incident["id"],
-        "type": incident_type,
-        "severity": severity,
-        "location": location,
-        "message": description,
-        "timestamp": incident["timestamp"],
-        "status": "New"
-    }
-
-    data["alerts"].append(alert)
-
-    save_data(data)
-
-    return incident
 CORS(app)
 
 HYDERABAD_POINT = (17.3850, 78.4867)
@@ -257,14 +309,20 @@ def calculate_congestion(vehicle_count, average_speed):
 
 @app.route("/api/incidents")
 def get_incidents():
-    data = load_data()
-    return jsonify(data["incidents"])
+    try:
+        return jsonify(fetch_incidents())
+    except Exception as exc:
+        print("INCIDENTS ERROR:", repr(exc))
+        return jsonify({"error": "Could not load incidents"}), 503
 
 
 @app.route("/api/alerts")
 def get_alerts():
-    data = load_data()
-    return jsonify(data["alerts"])
+    try:
+        return jsonify(fetch_alerts())
+    except Exception as exc:
+        print("ALERTS ERROR:", repr(exc))
+        return jsonify({"error": "Could not load alerts"}), 503
 # -----------------------------------
 # HOME
 # -----------------------------------
@@ -625,6 +683,15 @@ def garbage_detect():
         detections = detect_garbage(str(image_path))
 
         if detections:
+            try:
+                create_incident(
+                    incident_type="Garbage",
+                    severity="Medium",
+                    location="Hyderabad",
+                    description=f"{len(detections)} garbage item(s) detected by AI.",
+                )
+            except Exception as exc:
+                print("GARBAGE INCIDENT ERROR:", repr(exc))
             garbage_alerts.append({
                 "id": str(uuid.uuid4()),
                 "type": "Garbage",
@@ -660,13 +727,15 @@ def pothole_detect():
             detections = detect_potholes(str(image_path))
             if detections:
                 severity = "High" if len(detections) >= 3 else "Medium"
-
-                create_incident(
-                    incident_type="Pothole",
-                    severity=severity,
-                    location="Hyderabad",
-                    description=f"{len(detections)} pothole(s) detected by AI."
-                )
+                try:
+                    create_incident(
+                        incident_type="Pothole",
+                        severity=severity,
+                        location="Hyderabad",
+                        description=f"{len(detections)} pothole(s) detected by AI."
+                    )
+                except Exception as exc:
+                    print("POTHOLE INCIDENT ERROR:", repr(exc))
 
             return jsonify({"detections": detections})
         finally:

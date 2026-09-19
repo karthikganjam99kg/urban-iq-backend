@@ -40,8 +40,8 @@ and the first inference pays the warm-up cost.
 | `GET` | `/api/health` | Service status + which models are resident |
 | `GET` | `/api/traffic` | Live TomTom flow: speed, free-flow speed, congestion score + level |
 | `GET` | `/api/traffic-history` | Stored `traffic_realtime` rows from Supabase |
-| `GET` | `/api/alerts` | Civic alert stream |
-| `GET` | `/api/incidents` | Logged incident records |
+| `GET` | `/api/alerts` | Civic alerts from Supabase `alerts` |
+| `GET` | `/api/incidents` | Incident records from Supabase `incidents` |
 | `POST` | `/api/pothole-detect` | Boxed potholes with confidence (multipart upload) |
 | `GET` | `/api/pothole-result` | Last annotated pothole image |
 | `POST` | `/api/garbage-detect` | Waste objects + alert creation |
