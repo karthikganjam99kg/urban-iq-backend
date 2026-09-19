@@ -18,6 +18,7 @@ try:
     from dotenv import load_dotenv
 
     load_dotenv(PROJECT_ROOT / ".env")
+    load_dotenv(PROJECT_ROOT / ".env.supabase")
 except ImportError:
     pass
 
@@ -139,6 +140,105 @@ def create_incident(incident_type, severity, location, description):
 
     return incident
 CORS(app)
+
+HYDERABAD_POINT = (17.3850, 78.4867)
+_last_traffic_persist = 0
+
+
+def supabase_headers():
+    key = os.getenv("SUPABASE_SECRET_KEY")
+    if not key:
+        return None
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
+
+
+def persist_traffic_snapshot(payload):
+    """Write into the existing traffic_realtime table (service role)."""
+    global _last_traffic_persist
+    headers = supabase_headers()
+    base = os.getenv("SUPABASE_URL")
+    if not headers or not base:
+        return
+
+    now = time.time()
+    if now - _last_traffic_persist < 60:
+        return
+
+    current = payload["current_speed"]
+    free_flow = payload["free_flow_speed"]
+    speed_ratio = round(1 - (current / free_flow), 4) if free_flow else 0
+    row = {
+        "road_id": "hyd-tomtom-live",
+        "road_name": "Hyderabad TomTom Segment",
+        "latitude": HYDERABAD_POINT[0],
+        "longitude": HYDERABAD_POINT[1],
+        "current_speed": current,
+        "free_flow_speed": free_flow,
+        "current_travel_time": payload.get("current_travel_time"),
+        "free_flow_travel_time": payload.get("free_flow_travel_time"),
+        "speed_ratio": speed_ratio,
+        "delay_ratio": speed_ratio,
+        "congestion_score": payload["congestion_score"],
+        "congestion_level": payload["congestion_level"],
+        "confidence": payload.get("confidence"),
+        "road_closure": payload.get("road_closure", False),
+        "source": "TomTom",
+    }
+
+    try:
+        response = requests.post(
+            f"{base.rstrip('/')}/rest/v1/traffic_realtime",
+            headers=headers,
+            json=row,
+            timeout=10,
+        )
+        if response.ok:
+            _last_traffic_persist = now
+        else:
+            print("SUPABASE TRAFFIC INSERT:", response.status_code, response.text[:200])
+    except Exception as exc:
+        print("SUPABASE TRAFFIC INSERT ERROR:", repr(exc))
+
+
+def fetch_traffic_history(limit=30):
+    headers = supabase_headers()
+    base = os.getenv("SUPABASE_URL")
+    if not headers or not base:
+        return []
+
+    try:
+        response = requests.get(
+            f"{base.rstrip('/')}/rest/v1/traffic_realtime",
+            headers={**headers, "Prefer": "count=exact"},
+            params={
+                "select": "congestion_score,congestion_level,current_speed,recorded_at",
+                "order": "recorded_at.desc",
+                "limit": str(limit),
+            },
+            timeout=10,
+        )
+        if not response.ok:
+            print("SUPABASE TRAFFIC HISTORY:", response.status_code)
+            return []
+        rows = response.json()
+        rows.reverse()
+        return [
+            {
+                "congestion_score": row.get("congestion_score"),
+                "congestion_level": row.get("congestion_level"),
+                "current_speed": row.get("current_speed"),
+                "captured_at": row.get("recorded_at"),
+            }
+            for row in rows
+        ]
+    except Exception as exc:
+        print("SUPABASE TRAFFIC HISTORY ERROR:", repr(exc))
+        return []
 
 
 def calculate_congestion(vehicle_count, average_speed):
@@ -437,7 +537,7 @@ def traffic():
 
         params = {
             "key": api_key,
-            "point": "17.3850,78.4867",
+            "point": f"{HYDERABAD_POINT[0]},{HYDERABAD_POINT[1]}",
             "unit": "KMPH"
         }
 
@@ -477,7 +577,7 @@ def traffic():
         else:
             level = "Severe"
 
-        return jsonify({
+        payload = {
             "city": "Hyderabad",
             "current_speed": current_speed,
             "free_flow_speed": free_flow_speed,
@@ -488,7 +588,9 @@ def traffic():
             "confidence": tomtom_data["confidence"],
             "road_closure": tomtom_data["roadClosure"],
             "data_source": "TomTom Traffic Flow"
-        })
+        }
+        persist_traffic_snapshot(payload)
+        return jsonify(payload)
 
     except requests.exceptions.RequestException as e:
         print("TOMTOM CONNECTION ERROR:", repr(e))
@@ -503,6 +605,13 @@ def traffic():
         return jsonify({
             "error": str(e)
         }), 500
+
+
+@app.route("/api/traffic-history")
+def traffic_history():
+    return jsonify(fetch_traffic_history())
+
+
 @app.route("/api/garbage-detect", methods=["POST"])
 def garbage_detect():
     if "image" not in request.files:

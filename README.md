@@ -39,6 +39,7 @@ and the first inference pays the warm-up cost.
 | --- | --- | --- |
 | `GET` | `/api/health` | Service status + which models are resident |
 | `GET` | `/api/traffic` | Live TomTom flow: speed, free-flow speed, congestion score + level |
+| `GET` | `/api/traffic-history` | Stored `traffic_realtime` rows from Supabase |
 | `GET` | `/api/alerts` | Civic alert stream |
 | `GET` | `/api/incidents` | Logged incident records |
 | `POST` | `/api/pothole-detect` | Boxed potholes with confidence (multipart upload) |
@@ -76,6 +77,8 @@ curl https://priyaredddy-cse-hyderabad-urban-intelligence-api.hf.space/api/healt
 | Variable | Required | Notes |
 | --- | --- | --- |
 | `TOMTOM_API_KEY` | for `/api/traffic` | Set as a **Space secret**, never commit it |
+| `SUPABASE_URL` | for `/api/traffic-history` | Project URL, e.g. `https://xxxx.supabase.co` |
+| `SUPABASE_SECRET_KEY` | for `/api/traffic-history` | Service role / secret key — **never** put this in the frontend |
 
 On Hugging Face: *Space → Settings → Variables and secrets → New secret*. Locally, drop it in a
 gitignored `.env` — `python-dotenv` picks it up automatically.
