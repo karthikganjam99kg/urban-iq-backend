@@ -1,11 +1,22 @@
--- UrbanIQ: move urban_data.json into Postgres so alerts/incidents survive
--- container restarts and no longer ship inside the repo.
+-- Canonical UrbanIQ schema (urban-iq-backend).
+-- Run in Supabase Studio -> SQL Editor. Safe to re-run (IF NOT EXISTS).
 --
--- Run once in Supabase Studio -> SQL Editor.
--- Reads/writes go through the Flask API with the secret key, so RLS stays
--- closed to anonymous clients.
+-- Existing operational tables (do not recreate as traffic_snapshots / detections):
+--   traffic_realtime   TomTom flow (Flask writes with the secret key)
+--   road_damage        detections the browser may insert (anon RLS open)
+--   road_damage_events hazard events (anon insert blocked)
+--   vehicle_density    per-frame counts (anon insert blocked)
+--   ai_incidents       rash-motion / plate candidates (anon insert blocked)
+--   incidents          civic incidents (Flask secret key)
+--   buses              fleet positions
+--   alerts             civic alerts (Flask secret key)
 
--- 1. Alerts had no table at all.
+create index if not exists traffic_realtime_recorded_at_idx
+  on public.traffic_realtime (recorded_at desc);
+
+create index if not exists road_damage_created_at_idx
+  on public.road_damage (created_at desc);
+
 create table if not exists public.alerts (
   id bigserial primary key,
   alert_id text unique not null,
@@ -22,17 +33,14 @@ create table if not exists public.alerts (
 create index if not exists alerts_detected_at_idx
   on public.alerts (detected_at desc);
 
--- 2. The existing incidents table lacks the fields the JSON carries.
 alter table public.incidents
   add column if not exists severity text,
   add column if not exists location text,
   add column if not exists description text,
   add column if not exists status text;
 
--- incident_id is the natural key coming from the JSON payloads.
 create unique index if not exists incidents_incident_id_key
   on public.incidents (incident_id);
 
--- 3. Keep anonymous browser keys out of both tables.
 alter table public.alerts enable row level security;
 alter table public.incidents enable row level security;

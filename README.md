@@ -78,7 +78,7 @@ curl https://priyaredddy-cse-hyderabad-urban-intelligence-api.hf.space/api/healt
 | --- | --- | --- |
 | `TOMTOM_API_KEY` | for `/api/traffic` | Set as a **Space secret**, never commit it |
 | `SUPABASE_URL` | for `/api/traffic-history` | Project URL, e.g. `https://xxxx.supabase.co` |
-| `SUPABASE_SECRET_KEY` | for `/api/traffic-history` | Service role / secret key — **never** put this in the frontend |
+| `SUPABASE_SECRET_KEY` | for traffic history, alerts, incidents | Service role / secret key — **never** put this in the frontend |
 
 On Hugging Face: *Space → Settings → Variables and secrets → New secret*. Locally, drop it in a
 gitignored `.env` — `python-dotenv` picks it up automatically.

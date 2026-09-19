@@ -17,3 +17,5 @@ weights/best.pt
 __pycache__
 *.pyc
 .DS_Store
+api
+
