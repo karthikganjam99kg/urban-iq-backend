@@ -9,4 +9,3 @@ runs/
 .env
 .env.*
 !.env.example
-src/backend/urban_data.json

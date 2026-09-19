@@ -5,8 +5,6 @@ dist
 .cursor
 runs
 rtdetr_dataset
-rtdetr-l.pt
-weights/best.pt
 *.jpg
 *.jpeg
 *.png
@@ -17,5 +15,4 @@ weights/best.pt
 __pycache__
 *.pyc
 .DS_Store
-api
 

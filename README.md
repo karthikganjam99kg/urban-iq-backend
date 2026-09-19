@@ -100,7 +100,7 @@ One-time setup: create a Hugging Face **write** token that can update
 secret `HF_TOKEN` on this repo. The token must belong to an account that already
 has write access on that Space (Priya, or a collaborator she added).
 
-Manual Space push still works if you need it:
+The Space uses the Dockerfile, not a Procfile. Manual Space push still works if you need it:
 
 ```bash
 git remote add space https://huggingface.co/spaces/PRIYAREDDDY-CSE/hyderabad-urban-intelligence-api
