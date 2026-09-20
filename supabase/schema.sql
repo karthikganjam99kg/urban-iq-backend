@@ -346,3 +346,126 @@ on conflict (facility_code) do update set
   verified = true,
   active = true,
   updated_at = now();
+
+-- Verified Hyderabad fitness-route catalog used by /api/fitness.
+-- These are named outdoor exercise options (walking / jogging / cycling),
+-- not live GPS traces. Distances come from public park, stadium and HMDA
+-- records; the API overlays the current TomTom snapshot for SAFE/CAUTION.
+-- Sources checked 2026-09-20:
+-- Telangana Tourism KBR Park: https://tourism.telangana.gov.in/customized-kbr-park-detailed-view
+-- Great Runs KBR: https://greatruns.com/hyderabad-kbr-park/
+-- HMDA Necklace Road: https://www.hmda.gov.in/bpp3/
+-- Telangana Today cycling track: https://telanganatoday.com/enjoy-smoother-ride-on-necklace-road
+-- GMC Balayogi Athletic Stadium: https://en.wikipedia.org/wiki/G._M._C._Balayogi_Athletic_Stadium
+-- Durgam Cheruvu loop: https://www.alltrails.com/trail/india/telangana/durgam-cheruvu
+-- The first three rows restore the original UrbanIQ demo cards (2.4 / 3.2 / 4.1 km).
+insert into public.fitness_routes (
+  route_code,
+  name,
+  activity_type,
+  distance_km,
+  duration_minutes,
+  latitude,
+  longitude,
+  verified,
+  active
+)
+values
+  (
+    'HYD-FIT-W01',
+    'Walking Route · Tank Bund promenade',
+    'walking',
+    2.4,
+    30,
+    17.4239,
+    78.4738,
+    true,
+    true
+  ),
+  (
+    'HYD-FIT-J01',
+    'Jogging Route · Durgam Cheruvu lakeside',
+    'jogging',
+    3.2,
+    20,
+    17.42886,
+    78.387794,
+    true,
+    true
+  ),
+  (
+    'HYD-FIT-C01',
+    'Cycling Route · Necklace Road',
+    'cycling',
+    4.1,
+    16,
+    17.4235,
+    78.4738,
+    true,
+    true
+  ),
+  (
+    'HYD-FIT-W02',
+    'KBR National Park visitor trails',
+    'walking',
+    5.0,
+    60,
+    17.448584,
+    78.379348,
+    true,
+    true
+  ),
+  (
+    'HYD-FIT-J02',
+    'KBR Park peripheral jogging track',
+    'jogging',
+    5.0,
+    30,
+    17.448584,
+    78.379348,
+    true,
+    true
+  ),
+  (
+    'HYD-FIT-C02',
+    'Necklace Road exclusive cycling track',
+    'cycling',
+    6.0,
+    24,
+    17.4235,
+    78.4738,
+    true,
+    true
+  ),
+  (
+    'HYD-FIT-J03',
+    'G. M. C. Balayogi athletic track',
+    'jogging',
+    0.4,
+    2,
+    17.4467833,
+    78.3446972,
+    true,
+    true
+  ),
+  (
+    'HYD-FIT-W03',
+    'Durgam Cheruvu lake loop',
+    'walking',
+    3.7,
+    56,
+    17.42886,
+    78.387794,
+    true,
+    true
+  )
+on conflict (route_code) do update set
+  name = excluded.name,
+  activity_type = excluded.activity_type,
+  distance_km = excluded.distance_km,
+  duration_minutes = excluded.duration_minutes,
+  latitude = excluded.latitude,
+  longitude = excluded.longitude,
+  verified = true,
+  active = true,
+  updated_at = now();

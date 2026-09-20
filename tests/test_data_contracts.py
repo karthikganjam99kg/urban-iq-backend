@@ -151,6 +151,49 @@ class DataContractTests(unittest.TestCase):
         self.assertEqual(result["routes"], [])
         self.assertEqual(result["facilities"][0]["activities"], [])
 
+    def test_verified_fitness_routes_make_the_page_live(self):
+        def optional_rows(table, **_kwargs):
+            if table == "fitness_routes":
+                return [
+                    {
+                        "route_code": "HYD-FIT-W01",
+                        "name": "Walking Route",
+                        "activity_type": "walking",
+                        "distance_km": 2.4,
+                        "duration_minutes": 30,
+                        "verified": True,
+                        "active": True,
+                    }
+                ]
+            return [
+                {
+                    "facility_code": "HYD-SP-001",
+                    "name": "Stadium",
+                    "facility_type": "Arena",
+                    "activities": ["Athletics"],
+                    "verified": True,
+                    "active": True,
+                }
+            ]
+
+        with (
+            patch.object(
+                app_module,
+                "optional_supabase_rows",
+                side_effect=optional_rows,
+            ),
+            patch.object(
+                app_module,
+                "latest_traffic_snapshot",
+                return_value={"status": "live", "congestion_score": 12},
+            ),
+        ):
+            result = app_module.fetch_fitness()
+
+        self.assertEqual(result["status"], "live")
+        self.assertEqual(result["routes"][0]["safety"], "SAFE")
+        self.assertEqual(result["routes"][0]["route_code"], "HYD-FIT-W01")
+
     def test_stale_bus_does_not_claim_active_operational_status(self):
         old_stamp = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
 

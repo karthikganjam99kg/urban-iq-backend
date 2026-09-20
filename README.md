@@ -106,8 +106,14 @@ repository. Runtime data belongs in Supabase; model binaries belong only in
 - **Route recommendations** — a recommendation requires at least two routes with two observed
   condition signals no older than 15 minutes. Missing signals are not treated as zero.
 - **Fitness ownership** — only active, verified `fitness_routes` and `sports_facilities` rows are
-  returned. Facilities without routes report `catalog_only`, not `live`. The traffic safety overlay
-  is withheld when its latest snapshot is older than 10 minutes.
+  returned. Facilities without routes report `catalog_only`, not `live`. Fitness routes are a
+  curated Hyderabad catalog (walking / jogging / cycling options), not live GPS traces; TomTom is
+  overlaid as SAFE / CAUTION / NO DATA. The traffic overlay is withheld when its latest snapshot
+  is older than 10 minutes.
+- **Fitness route references** — the schema seed restores the original three demo cards
+  (2.4 km walking, 3.2 km jogging, 4.1 km cycling) and adds named public Hyderabad trails:
+  KBR Park visitor trails and peripheral track, Necklace Road cycling, the Gachibowli 400 m
+  athletic track, and the Durgam Cheruvu lake loop.
 - **Sports facility references** — the idempotent schema seed contains six established Hyderabad
   venues. Venue names and activities were checked against
   [SATG venue booking](https://satg.telangana.gov.in/regular/stadiumbooking),
