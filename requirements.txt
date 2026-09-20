@@ -2,7 +2,6 @@ Flask
 flask-cors
 python-dotenv
 ultralytics
-huggingface_hub
 gunicorn
 requests
 easyocr

@@ -1,4 +1,3 @@
-import sys
 from pathlib import Path
 import os
 import requests
@@ -9,7 +8,6 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-sys.path.append(str(PROJECT_ROOT))
 
 # Local development reads secrets from .env; hosted runs use platform secrets.
 try:
@@ -1883,9 +1881,8 @@ def pothole_result():
 # -----------------------------------
 
 if __name__ == "__main__":
-
     app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000)),
-        debug=True
+        host="127.0.0.1",
+        port=int(os.environ.get("PORT", 5001)),
+        debug=False,
     )

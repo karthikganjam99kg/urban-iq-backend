@@ -198,6 +198,15 @@ gunicorn --bind 127.0.0.1:5001 --workers 1 --threads 2 --timeout 300 src.backend
 
 Port 5001, not 5000 — macOS AirPlay Receiver claims 5000 and returns 403.
 
+Run the fast data-contract suite without loading YOLO weights:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The GitHub deployment workflow runs this suite before syncing `main` to the
+Hugging Face Space.
+
 <div align="center">
 
 **Smart India Hackathon · Problem Statement 26124**
