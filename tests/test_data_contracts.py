@@ -9,6 +9,16 @@ from src.backend import app as app_module
 
 
 class DataContractTests(unittest.TestCase):
+    def test_model_weights_share_the_canonical_directory(self):
+        expected = {
+            "vehicle.pt",
+            "garbage.pt",
+            "pothole2v.pt",
+            "license_plate.pt",
+        }
+        weights = app_module.PROJECT_ROOT / "weights"
+        self.assertTrue(expected.issubset({path.name for path in weights.iterdir()}))
+
     def test_demand_excludes_operator_and_unconfigured_frames(self):
         now = datetime.now(timezone.utc)
         rows = [

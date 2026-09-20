@@ -2,10 +2,6 @@
 __pycache__/
 *.pyc
 runs/
-*.jpg
-*.jpeg
-*.png
-*.webp
 .env
 .env.*
 !.env.example

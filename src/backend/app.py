@@ -5,7 +5,6 @@ import requests
 import uuid
 import time
 import tempfile
-import threading
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -30,76 +29,12 @@ if os.getenv("VERCEL") or os.getenv("SPACE_ID"):
 
 from flask import Flask, g, jsonify, request
 from flask_cors import CORS
-
-# Vehicle detection model
-# AI models are loaded only when required
-vehicle_model = None
-plate_model = None
-plate_reader = None
-model_readiness_lock = threading.Lock()
-model_readiness_cache = {"checked_at": 0.0, "ready": {}, "errors": {}}
-def get_vehicle_model():
-    global vehicle_model
-
-    if vehicle_model is None:
-        from ultralytics import YOLO
-        vehicle_model = YOLO(str(PROJECT_ROOT / "yolo11n.pt"))
-
-    return vehicle_model
-
-
-def get_plate_model():
-    global plate_model
-
-    if plate_model is None:
-        from ultralytics import YOLO
-        plate_model = YOLO(str(PROJECT_ROOT / "weights" / "license_plate.pt"))
-
-    return plate_model
-
-def get_plate_reader():
-    global plate_reader
-
-    if plate_reader is None:
-        import easyocr
-        plate_reader = easyocr.Reader(["en"], gpu=False)
-
-    return plate_reader
-
-
-def model_readiness():
-    global model_readiness_cache
-    from src.garbage_ai.garbage_detector import get_garbage_model
-    from src.pothole_ai.pothole_detector import get_pothole_model
-
-    with model_readiness_lock:
-        cache_age = time.monotonic() - model_readiness_cache["checked_at"]
-        if model_readiness_cache["ready"] and cache_age <= 30:
-            return (
-                dict(model_readiness_cache["ready"]),
-                dict(model_readiness_cache["errors"]),
-            )
-
-        factories = {
-            "vehicle": get_vehicle_model,
-            "garbage": get_garbage_model,
-            "pothole": get_pothole_model,
-            "plate": get_plate_model,
-        }
-        ready = {}
-        errors = {}
-        for name, factory in factories.items():
-            try:
-                ready[name] = factory() is not None
-            except Exception as exc:
-                ready[name] = False
-                errors[name] = f"{type(exc).__name__}: {exc}"
-        model_readiness_cache = {
-            "checked_at": time.monotonic(),
-            "ready": ready,
-            "errors": errors,
-        }
-        return dict(ready), dict(errors)
+from src.backend.models import (
+    get_plate_model,
+    get_plate_reader,
+    get_vehicle_model,
+    model_readiness,
+)
 
 
 app = Flask(__name__)

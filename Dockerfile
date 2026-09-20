@@ -22,7 +22,6 @@ RUN pip install --no-cache-dir torch torchvision --index-url https://download.py
 
 COPY src ./src
 COPY weights ./weights
-COPY yolo11n.pt ./yolo11n.pt
 
 EXPOSE 7860
 

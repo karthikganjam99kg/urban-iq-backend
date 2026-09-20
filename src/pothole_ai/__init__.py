@@ -1,0 +1,1 @@
+"""Pothole detection model package."""

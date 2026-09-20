@@ -30,14 +30,14 @@ This service is the heavy half of [UrbanIQ](https://github.com/karthikganjam99kg
 It takes a frame from a bus camera and returns civic intelligence: potholes with confidence,
 garbage hotspots, vehicle counts, licence plates, rash-motion scores, and live congestion.
 
-It runs on **CPU only**. Models load lazily on first request, so the container boots in seconds
-and the first inference pays the warm-up cost.
+It runs on **CPU only**. Models load through a shared lazy registry; the first readiness check
+loads and validates the weights, then inference reuses those model instances.
 
 ## 🔌 Endpoints
 
 | Method | Route | Returns |
 | --- | --- | --- |
-| `GET` | `/api/health` | Service status + which models are resident |
+| `GET` | `/api/health` | Service status + verified model readiness |
 | `GET` | `/api/traffic` | Live TomTom flow: speed, free-flow speed, congestion score + level |
 | `GET` | `/api/traffic-history` | Stored `traffic_realtime` rows from Supabase |
 | `GET` | `/api/fleet` | Supabase bus positions, speeds, routes and telemetry freshness |
@@ -66,13 +66,35 @@ curl https://priyaredddy-cse-hyderabad-urban-intelligence-api.hf.space/api/healt
 | Model | Weight | Job |
 | --- | --- | --- |
 | Pothole | `weights/pothole2v.pt` | Road surface damage |
-| Garbage | `src/garbage_ai/best.pt` | Waste / dumping detection |
-| Vehicle | `yolo11n.pt` | Vehicle class + count |
+| Garbage | `weights/garbage.pt` | Waste / dumping detection |
+| Vehicle | `weights/vehicle.pt` | Vehicle class + count |
 | Plate | `weights/license_plate.pt` | Plate localisation, then EasyOCR |
+
+## 🗂️ Repository layout
+
+```text
+src/
+├── backend/
+│   ├── app.py           # Flask routes and Supabase-backed domain services
+│   └── models.py        # lazy model registry and readiness checks
+├── garbage_ai/          # garbage inference adapter
+└── pothole_ai/          # pothole inference adapter
+weights/                 # all Git LFS model weights
+scripts/                 # explicit operator/demo utilities
+supabase/schema.sql      # canonical idempotent database migration
+tests/                   # API/data-contract regression tests
+Dockerfile               # Hugging Face Space runtime
+```
+
+The frontend, browser-safe configuration and operator GPS page live in the
+separate [`urban-iq-frontend`](https://github.com/karthikganjam99kg/urban-iq-frontend)
+repository. Runtime data belongs in Supabase; model binaries belong only in
+`weights/`.
 
 ## 🏗️ Design notes
 
-- **Lazy loading** — each model is instantiated on first use, never at import time.
+- **Lazy loading** — `src/backend/models.py` owns model initialization and
+  short-lived readiness caching; route imports never load weights.
 - **Writable caches** — on Spaces and serverless runtimes, `YOLO_CONFIG_DIR`, `HF_HOME`,
   `TORCH_HOME` and `MPLCONFIGDIR` are redirected to `/tmp`, because the app directory can be
   read-only.
