@@ -1699,6 +1699,7 @@ def garbage_detect():
         from src.garbage_ai.garbage_detector import detect_garbage
 
         detections = detect_garbage(str(image_path))
+        alert_created = False
 
         if detections:
             try:
@@ -1711,10 +1712,14 @@ def garbage_detect():
                     route_id=request.form.get("route_id"),
                     recommendation="Schedule cleaning for the detected area.",
                 )
+                alert_created = True
             except Exception as exc:
                 print("GARBAGE INCIDENT ERROR:", repr(exc))
 
-        return jsonify({"detections": detections})
+        return jsonify({
+            "detections": detections,
+            "alert_created": alert_created,
+        })
     except Exception as error:
         app.logger.exception("Garbage detection failed")
         return jsonify({"error": str(error)}), 500
@@ -1739,6 +1744,7 @@ def pothole_detect():
 
         try:
             detections = detect_potholes(str(image_path))
+            alert_created = False
             if detections:
                 severity = "High" if len(detections) >= 3 else "Medium"
                 route_id = request.form.get("route_id")
@@ -1752,6 +1758,7 @@ def pothole_detect():
                         route_id=route_id,
                         recommendation="Inspect and schedule road repair.",
                     )
+                    alert_created = True
                 except Exception as exc:
                     print("POTHOLE INCIDENT ERROR:", repr(exc))
                 persist_route_condition(
@@ -1769,6 +1776,7 @@ def pothole_detect():
             return jsonify({
                 "detections": detections,
                 "road_risk": road_risk,
+                "alert_created": alert_created,
             })
         finally:
             image_path.unlink(missing_ok=True)

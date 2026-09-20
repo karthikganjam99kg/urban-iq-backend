@@ -85,6 +85,18 @@ curl https://priyaredddy-cse-hyderabad-urban-intelligence-api.hf.space/api/healt
   pothole, and waterlogging observations no older than 15 minutes.
 - **Fitness ownership** — only active, verified `fitness_routes` and `sports_facilities` rows are
   returned. The traffic safety overlay is withheld when its latest snapshot is older than 10 minutes.
+- **Sports facility references** — the idempotent schema seed contains six established Hyderabad
+  venues. Venue names and activities were checked against
+  [SATG venue booking](https://satg.telangana.gov.in/regular/stadiumbooking),
+  [Khelo India Hyderabad](https://web.kheloindia.gov.in/sai-training-centre-hyderabad), and
+  [Khelo India Saroornagar](https://web.kheloindia.gov.in/saroornagar-stadium). Coordinates and
+  venue-specific activity lists were cross-checked against the public records for
+  [Gachibowli Athletic Stadium](https://en.wikipedia.org/wiki/G._M._C._Balayogi_Athletic_Stadium),
+  [Gachibowli Indoor Stadium](https://en.wikipedia.org/wiki/G._M._C._Balayogi_Indoor_Stadium),
+  [LB Stadium](https://en.wikipedia.org/wiki/Lal_Bahadur_Shastri_Stadium,_Hyderabad),
+  [Uppal Stadium](https://en.wikipedia.org/wiki/Rajiv_Gandhi_International_Stadium),
+  [Kotla Vijay Bhaskar Reddy Indoor Stadium](https://en.wikipedia.org/wiki/Kotla_Vijay_Bhaskar_Reddy_Indoor_Stadium),
+  and [Saroornagar Indoor Arena](https://en.wikipedia.org/wiki/Saroornagar_Indoor_Arena).
 - **Simulation baseline** — scenarios require a traffic snapshot from the last 10 minutes, since
   the score is derived from the measured road speed. No fallback traffic score is used. The
   observed vehicle-density comparison is optional and reports its own `baseline.status` of `live`

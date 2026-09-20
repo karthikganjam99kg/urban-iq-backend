@@ -233,3 +233,116 @@ on conflict (bus_id) do update set
   display_name = excluded.display_name,
   active = true,
   updated_at = now();
+
+-- Verified Hyderabad sports reference data used by /api/fitness.
+-- Sources checked 2026-09-20:
+-- SATG venue booking: https://satg.telangana.gov.in/regular/stadiumbooking
+-- Khelo India Hyderabad: https://web.kheloindia.gov.in/sai-training-centre-hyderabad
+-- Khelo India Saroornagar: https://web.kheloindia.gov.in/saroornagar-stadium
+-- Coordinates and venue details were cross-checked against the corresponding
+-- public venue records linked in the project README.
+insert into public.sports_facilities (
+  facility_code,
+  name,
+  facility_type,
+  activities,
+  latitude,
+  longitude,
+  verified,
+  active
+)
+values
+  (
+    'HYD-SP-001',
+    'G. M. C. Balayogi Athletic Stadium',
+    'Multi-purpose stadium',
+    array['Athletics', 'Football'],
+    17.4467833,
+    78.3446972,
+    true,
+    true
+  ),
+  (
+    'HYD-SP-002',
+    'G. M. C. Balayogi Indoor Stadium',
+    'Indoor arena',
+    array[
+      'Badminton',
+      'Basketball',
+      'Kabaddi',
+      'Table Tennis',
+      'Boxing',
+      'Judo',
+      'Wrestling',
+      'Weightlifting'
+    ],
+    17.4481611,
+    78.3451722,
+    true,
+    true
+  ),
+  (
+    'HYD-SP-003',
+    'Lal Bahadur Shastri Stadium',
+    'Multi-purpose stadium',
+    array['Football', 'Cricket'],
+    17.399333,
+    78.473333,
+    true,
+    true
+  ),
+  (
+    'HYD-SP-004',
+    'Rajiv Gandhi International Cricket Stadium',
+    'Cricket stadium',
+    array['Cricket'],
+    17.40639,
+    78.55028,
+    true,
+    true
+  ),
+  (
+    'HYD-SP-005',
+    'Kotla Vijay Bhaskar Reddy Indoor Stadium',
+    'Indoor arena',
+    array[
+      'Badminton',
+      'Basketball',
+      'Gymnastics',
+      'Martial Arts',
+      'Skating',
+      'Boxing'
+    ],
+    17.434863,
+    78.426434,
+    true,
+    true
+  ),
+  (
+    'HYD-SP-006',
+    'Saroornagar Indoor Stadium',
+    'Indoor arena',
+    array[
+      'Athletics',
+      'Badminton',
+      'Basketball',
+      'Volleyball',
+      'Gymnastics',
+      'Kabaddi',
+      'Boxing',
+      'Table Tennis'
+    ],
+    17.35417,
+    78.54389,
+    true,
+    true
+  )
+on conflict (facility_code) do update set
+  name = excluded.name,
+  facility_type = excluded.facility_type,
+  activities = excluded.activities,
+  latitude = excluded.latitude,
+  longitude = excluded.longitude,
+  verified = true,
+  active = true,
+  updated_at = now();
