@@ -5,6 +5,7 @@ import requests
 import uuid
 import time
 import tempfile
+import threading
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -27,7 +28,7 @@ if os.getenv("VERCEL") or os.getenv("SPACE_ID"):
     os.environ.setdefault("TORCH_HOME", "/tmp/torch")
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, g, jsonify, request
 from flask_cors import CORS
 
 # Vehicle detection model
@@ -35,6 +36,8 @@ from flask_cors import CORS
 vehicle_model = None
 plate_model = None
 plate_reader = None
+model_readiness_lock = threading.Lock()
+model_readiness_cache = {"checked_at": 0.0, "ready": {}, "errors": {}}
 def get_vehicle_model():
     global vehicle_model
 
@@ -63,18 +66,81 @@ def get_plate_reader():
 
     return plate_reader
 
+
+def model_readiness():
+    global model_readiness_cache
+    from src.garbage_ai.garbage_detector import get_garbage_model
+    from src.pothole_ai.pothole_detector import get_pothole_model
+
+    with model_readiness_lock:
+        cache_age = time.monotonic() - model_readiness_cache["checked_at"]
+        if model_readiness_cache["ready"] and cache_age <= 30:
+            return (
+                dict(model_readiness_cache["ready"]),
+                dict(model_readiness_cache["errors"]),
+            )
+
+        factories = {
+            "vehicle": get_vehicle_model,
+            "garbage": get_garbage_model,
+            "pothole": get_pothole_model,
+            "plate": get_plate_model,
+        }
+        ready = {}
+        errors = {}
+        for name, factory in factories.items():
+            try:
+                ready[name] = factory() is not None
+            except Exception as exc:
+                ready[name] = False
+                errors[name] = f"{type(exc).__name__}: {exc}"
+        model_readiness_cache = {
+            "checked_at": time.monotonic(),
+            "ready": ready,
+            "errors": errors,
+        }
+        return dict(ready), dict(errors)
+
+
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
 # Rash driving tracking
 previous_vehicle_positions = {}
 rash_driving_alerts = []
 
 
+class UploadValidationError(ValueError):
+    pass
+
+
 def save_upload(upload, prefix):
-    suffix = Path(upload.filename or "upload.jpg").suffix or ".jpg"
+    suffix = (Path(upload.filename or "upload.jpg").suffix or ".jpg").lower()
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+        raise UploadValidationError("Only JPG, PNG, and WEBP images are supported.")
+    if upload.mimetype and not upload.mimetype.startswith("image/"):
+        raise UploadValidationError("The uploaded file must be an image.")
     handle, path = tempfile.mkstemp(prefix=f"{prefix}_", suffix=suffix)
     os.close(handle)
     upload.save(path)
-    return Path(path)
+    upload_path = Path(path)
+    g.upload_paths = [*getattr(g, "upload_paths", []), upload_path]
+    return upload_path
+
+
+@app.errorhandler(UploadValidationError)
+def invalid_upload(error):
+    return jsonify({"error": str(error)}), 400
+
+
+@app.errorhandler(413)
+def upload_too_large(_error):
+    return jsonify({"error": "Image exceeds the 12 MB upload limit."}), 413
+
+
+@app.teardown_request
+def cleanup_uploads(_error):
+    for upload_path in getattr(g, "upload_paths", []):
+        upload_path.unlink(missing_ok=True)
 
 def supabase_base():
     base = os.getenv("SUPABASE_URL")
@@ -175,8 +241,10 @@ def build_telemetry_row(reading, catalog, observed_at):
 
     row = {
         "bus_id": bus_id,
-        "latitude": coerce_number(reading.get("latitude"), "latitude", -90, 90),
-        "longitude": coerce_number(reading.get("longitude"), "longitude", -180, 180),
+        "latitude": coerce_number(reading.get("latitude"), "latitude", 16.5, 18.5),
+        "longitude": coerce_number(
+            reading.get("longitude"), "longitude", 77.5, 79.5
+        ),
         "recorded_at": observed_at,
     }
 
@@ -305,6 +373,7 @@ def fetch_fleet():
             or "Unassigned"
         )
         route = routes.get(route_id, {})
+        reported_status = row.get("status") or "UNKNOWN"
         buses.append(
             {
                 "id": bus_id,
@@ -318,7 +387,10 @@ def fetch_fleet():
                 "longitude": row.get("longitude"),
                 "speed": row.get("speed"),
                 "heading": row.get("heading"),
-                "operational_status": row.get("status") or "UNKNOWN",
+                "operational_status": (
+                    reported_status if telemetry_status == "live" else "UNKNOWN"
+                ),
+                "last_reported_operational_status": reported_status,
                 "telemetry_status": telemetry_status,
                 "recorded_at": (
                     recorded_at.isoformat() if recorded_at else row.get("recorded_at")
@@ -361,7 +433,7 @@ def create_incident(
     recommendation=None,
 ):
     incident_id = str(uuid.uuid4())
-    stamp = datetime.now().isoformat()
+    stamp = datetime.now(timezone.utc).isoformat()
     incident_body = {
         "incident_id": incident_id,
         "incident_type": incident_type,
@@ -413,10 +485,22 @@ def create_incident(
     })
 
 
-CORS(app)
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ORIGINS",
+        (
+            "https://hyderabad-urban-intelligence.vercel.app,"
+            "http://localhost:5173,http://127.0.0.1:5173"
+        ),
+    ).split(",")
+    if origin.strip()
+]
+CORS(app, resources={r"/api/*": {"origins": cors_origins}})
 
 HYDERABAD_POINT = (17.3850, 78.4867)
 _last_traffic_persist = 0
+_traffic_cache = {"payload": None, "fetched_at": 0.0}
 
 
 def supabase_headers():
@@ -648,18 +732,30 @@ def fetch_demand_forecast():
         "buses",
         params={"select": "bus_id,route_id,status", "limit": "500"},
     )
+    configured_vehicles = optional_supabase_rows(
+        "fleet_vehicles",
+        params={"select": "bus_id,route_id", "active": "eq.true", "limit": "500"},
+    )
     route_by_bus = {
         row.get("bus_id"): row.get("route_id") or "Unassigned"
-        for row in buses
+        for row in (configured_vehicles if configured_vehicles is not None else buses)
+        if row.get("bus_id")
     }
 
     minute_values = defaultdict(list)
     valid_stamps = []
+    eligible_frames = 0
     for row in rows:
         stamp = parse_timestamp(row.get("recorded_at"))
         bus_id = row.get("bus_id")
-        if not stamp or not bus_id:
+        if (
+            not stamp
+            or not bus_id
+            or bus_id == "OPERATOR-UPLOAD"
+            or bus_id not in route_by_bus
+        ):
             continue
+        eligible_frames += 1
         stamp = stamp.astimezone(timezone.utc)
         minute = stamp.replace(second=0, microsecond=0)
         minute_values[(bus_id, minute)].append(float(row.get("person_count") or 0))
@@ -723,7 +819,8 @@ def fetch_demand_forecast():
     ]
     latest_stamp = max(valid_stamps).isoformat() if valid_stamps else None
     quality = {
-        "raw_frames": len(rows),
+        "raw_frames": eligible_frames,
+        "excluded_frames": len(rows) - eligible_frames,
         "minute_buckets": len(minute_values),
         "buses_observed": len(grouped_by_bus),
         "latest_observation": latest_stamp,
@@ -889,10 +986,25 @@ def fetch_routes():
             else None
             for stamp in signal_stamps
         ]
+        signal_names = ("congestion", "pothole", "waterlogging")
+        fresh_signals = [
+            name
+            for name, value, age in zip(
+                signal_names,
+                (
+                    condition.get("congestion_score") if condition else None,
+                    condition.get("pothole_count") if condition else None,
+                    condition.get("waterlogging_count") if condition else None,
+                ),
+                signal_ages,
+            )
+            if value is not None and age is not None and age <= 900
+        ]
         condition_status = (
             "live"
-            if signal_ages
-            and all(age is not None and age <= 900 for age in signal_ages)
+            if len(fresh_signals) >= 2
+            else "partial"
+            if fresh_signals
             else ("stale" if condition else "missing")
         )
         routes.append(
@@ -911,6 +1023,8 @@ def fetch_routes():
                 "waterlogging_count": (
                     condition.get("waterlogging_count") if condition else None
                 ),
+                "fresh_signals": fresh_signals,
+                "evidence_count": len(fresh_signals),
                 "observed_at": (
                     observed_at.isoformat() if observed_at else None
                 ),
@@ -919,21 +1033,16 @@ def fetch_routes():
 
     scored = []
     for route in routes:
-        signals = (
-            route["congestion_score"],
-            route["pothole_count"],
-            route["waterlogging_count"],
-        )
-        if route["condition_status"] != "live" or any(
-            value is None for value in signals
-        ):
+        if route["condition_status"] != "live":
             continue
-        score = min(
-            100,
-            float(route["congestion_score"])
-            + int(route["pothole_count"]) * 10
-            + int(route["waterlogging_count"]) * 15,
-        )
+        components = []
+        if "congestion" in route["fresh_signals"]:
+            components.append(float(route["congestion_score"]))
+        if "pothole" in route["fresh_signals"]:
+            components.append(min(100, int(route["pothole_count"]) * 10))
+        if "waterlogging" in route["fresh_signals"]:
+            components.append(min(100, int(route["waterlogging_count"]) * 15))
+        score = sum(components) / len(components)
         scored.append({**route, "score": round(score, 1)})
     scored.sort(key=lambda row: row["score"])
 
@@ -950,7 +1059,7 @@ def fetch_routes():
         "message": (
             None
             if len(scored) >= 2
-            else "At least two routes need fresh traffic, pothole, and waterlogging signals."
+            else "At least two routes need two recent observed condition signals."
         ),
         "generated_at": now.isoformat(),
     }
@@ -1017,7 +1126,9 @@ def fetch_fitness():
     return {
         "status": (
             "live"
-            if schema_ready and (routes or facilities)
+            if schema_ready and routes
+            else "catalog_only"
+            if schema_ready and facilities
             else ("empty" if schema_ready else "schema_required")
         ),
         "schema_ready": schema_ready,
@@ -1033,16 +1144,15 @@ def fetch_overview():
     traffic = latest_traffic_snapshot()
     demand = fetch_demand_forecast()
     alerts = fetch_alerts()
-    model_paths = {
-        "vehicle": PROJECT_ROOT / "yolo11n.pt",
-        "garbage": PROJECT_ROOT / "src" / "garbage_ai" / "best.pt",
-        "pothole": PROJECT_ROOT / "weights" / "pothole2v.pt",
-    }
-    models = {name: path.is_file() for name, path in model_paths.items()}
+    models, _ = model_readiness()
     services = {
         "fleet": fleet_data["status"],
         "traffic": traffic["status"] if traffic else "empty",
-        "vision": "live" if all(models.values()) else "degraded",
+        "vision": (
+            "live"
+            if all(models.get(name) for name in ("vehicle", "garbage", "pothole"))
+            else "degraded"
+        ),
         "demand": demand["status"],
     }
     critical_healthy = (
@@ -1056,7 +1166,8 @@ def fetch_overview():
         "models": models,
         "fleet": fleet_data["summary"],
         "active_alerts": sum(
-            str(alert.get("status", "")).lower() not in {"resolved", "closed"}
+            str(alert.get("status", "")).lower()
+            not in {"resolved", "closed", "dismissed"}
             for alert in alerts
         ),
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1332,17 +1443,15 @@ def home():
 
 @app.route("/api/health")
 def health():
-    model_paths = {
-        "vehicle": PROJECT_ROOT / "yolo11n.pt",
-        "garbage": PROJECT_ROOT / "src" / "garbage_ai" / "best.pt",
-        "pothole": PROJECT_ROOT / "weights" / "pothole2v.pt",
-    }
+    models, _ = model_readiness()
+    core_ready = all(
+        models.get(name) for name in ("vehicle", "garbage", "pothole")
+    )
     return jsonify({
-        "status": "ok",
-        "models": {
-            name: path.is_file() for name, path in model_paths.items()
-        },
-    })
+        "status": "ok" if core_ready else "degraded",
+        "models": models,
+        "failed_models": [name for name, ready in models.items() if not ready],
+    }), 200 if core_ready else 503
 
 
 # -----------------------------------
@@ -1593,7 +1702,21 @@ def rash_driving():
 
 @app.route("/api/traffic")
 def traffic():
+    global _traffic_cache
     try:
+        route_id = request.args.get("route_id")
+        bus_id = request.args.get("bus_id")
+        cache_age = time.monotonic() - _traffic_cache["fetched_at"]
+        if _traffic_cache["payload"] is not None and cache_age <= 15:
+            payload = {**_traffic_cache["payload"], "cache_age_seconds": round(cache_age)}
+            persist_traffic_snapshot(payload, route_id=route_id, bus_id=bus_id)
+            persist_route_condition(
+                route_id,
+                source="TomTom",
+                congestion_score=payload["congestion_score"],
+            )
+            return jsonify(payload)
+
         api_key = os.getenv("TOMTOM_API_KEY")
 
         if not api_key:
@@ -1658,8 +1781,10 @@ def traffic():
             "road_closure": tomtom_data["roadClosure"],
             "data_source": "TomTom Traffic Flow"
         }
-        route_id = request.args.get("route_id")
-        bus_id = request.args.get("bus_id")
+        _traffic_cache = {
+            "payload": payload,
+            "fetched_at": time.monotonic(),
+        }
         persist_traffic_snapshot(payload, route_id=route_id, bus_id=bus_id)
         persist_route_condition(
             route_id,
@@ -1795,22 +1920,13 @@ def pothole_detect():
 
 @app.route("/api/pothole-result")
 def pothole_result():
-
-    project_root = Path(__file__).resolve().parents[2]
-
-    result_folder = project_root / "runs" / "detect" / "predict"
-
-    image_path = result_folder / "Pothole.jpg"
-
-    if not image_path.exists():
-        return jsonify({
-            "error": "Pothole result image not found"
-        }), 404
-
-    return send_file(
-        str(image_path),
-        mimetype="image/jpeg"
-    )
+    return jsonify({
+        "status": "deprecated",
+        "message": (
+            "Annotated images are rendered client-side from /api/pothole-detect "
+            "boxes; uploaded files are deleted after analysis."
+        ),
+    }), 410
 # -----------------------------------
 # START FLASK
 # -----------------------------------

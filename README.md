@@ -50,7 +50,7 @@ and the first inference pays the warm-up cost.
 | `GET` | `/api/alerts` | Civic alerts from Supabase `alerts` |
 | `GET` | `/api/incidents` | Incident records from Supabase `incidents` |
 | `POST` | `/api/pothole-detect` | Boxed potholes with confidence (multipart upload) |
-| `GET` | `/api/pothole-result` | Last annotated pothole image |
+| `GET` | `/api/pothole-result` | Deprecated (`410`); boxes are returned by `/api/pothole-detect` |
 | `POST` | `/api/garbage-detect` | Waste objects + alert creation |
 | `POST` | `/api/vehicle-detect` | Vehicle count, labels, confidence |
 | `POST` | `/api/plate-detect` | Plate crops + OCR text (EasyOCR) |
@@ -81,10 +81,11 @@ curl https://priyaredddy-cse-hyderabad-urban-intelligence-api.hf.space/api/healt
   recent minute buckets spanning 30 minutes; otherwise it reports `collecting`.
 - **Fleet freshness** — telemetry is `live` for five minutes, then `stale`; configured vehicles
   without any telemetry report `missing`.
-- **Route recommendations** — a recommendation requires at least two routes with traffic,
-  pothole, and waterlogging observations no older than 15 minutes.
+- **Route recommendations** — a recommendation requires at least two routes with two observed
+  condition signals no older than 15 minutes. Missing signals are not treated as zero.
 - **Fitness ownership** — only active, verified `fitness_routes` and `sports_facilities` rows are
-  returned. The traffic safety overlay is withheld when its latest snapshot is older than 10 minutes.
+  returned. Facilities without routes report `catalog_only`, not `live`. The traffic safety overlay
+  is withheld when its latest snapshot is older than 10 minutes.
 - **Sports facility references** — the idempotent schema seed contains six established Hyderabad
   venues. Venue names and activities were checked against
   [SATG venue booking](https://satg.telangana.gov.in/regular/stadiumbooking),
@@ -106,7 +107,7 @@ curl https://priyaredddy-cse-hyderabad-urban-intelligence-api.hf.space/api/healt
   `route_id` multipart fields. These links let detections accumulate route and demand evidence.
   Vehicle stills posted without a `bus_id` are stored as `OPERATOR-UPLOAD`, which keeps operator
   captures out of per-vehicle fleet views while still recording a real observation.
-- **CORS open** — the Vercel frontend calls this from another origin.
+- **CORS allowlist** — `CORS_ORIGINS` defaults to the production Vercel host and local Vite hosts.
 
 ## 🔑 Secrets
 
@@ -136,7 +137,8 @@ curl -X POST https://<space>.hf.space/api/fleet/telemetry \
 - `route_id` is taken from the vehicle catalog when omitted.
 - `speed`, `heading` and `status` are optional. Status is stored only when reported, so the UI
   shows `UNKNOWN` rather than assuming a bus is in service.
-- Readings are appended, so `/api/fleet` always reads the newest row per vehicle.
+- Each vehicle keeps its latest reading through a `bus_id` upsert. Stale readings retain their
+  last reported state separately but expose `operational_status: UNKNOWN`.
 
 Without the key, `/api/traffic` returns `{"error": "TomTom API key not found"}` and the frontend
 shows a clear *feed offline* state instead of hanging.
