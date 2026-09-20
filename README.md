@@ -171,6 +171,27 @@ curl -X POST https://<space>.hf.space/api/fleet/telemetry \
 Without the key, `/api/traffic` returns `{"error": "TomTom API key not found"}` and the frontend
 shows a clear *feed offline* state instead of hanging.
 
+## 🎬 Prepare presentation data
+
+One idempotent command refreshes every presentation-only signal:
+
+```bash
+cd ~/Downloads/urban-iq-backend
+python3 scripts/seed_presentation_data.py
+```
+
+Run it within **five minutes** of opening the demo, then refresh the browser. It refreshes:
+
+- five fleet positions (`live` for 5 minutes);
+- five routes with fresh congestion + pothole evidence (`live` for 15 minutes);
+- six demand buckets over 35 minutes for five buses (`live` for 30 minutes);
+- the verified fitness-route catalog (persistent).
+
+The script reads the gitignored `.env.supabase` automatically. It deletes and replaces only rows
+whose `source` is `UrbanIQ_presentation_seed`; it never deletes real camera, device, TomTom,
+detection, incident, or alert data. Re-run it during a long presentation if the fleet status
+turns stale.
+
 ## 🚀 Deploy
 
 Push to `main` on GitHub. A GitHub Action (`sync-to-space.yml`) mirrors the tree to
