@@ -485,17 +485,21 @@ def create_incident(
     })
 
 
-cors_origins = [
-    origin.strip()
-    for origin in os.getenv(
-        "CORS_ORIGINS",
-        (
-            "https://hyderabad-urban-intelligence.vercel.app,"
-            "http://localhost:5173,http://127.0.0.1:5173"
-        ),
-    ).split(",")
-    if origin.strip()
-]
+def build_cors_origins(configured=""):
+    origins = [
+        "https://hyderabad-urban-intelligence.vercel.app",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    origins.extend(
+        origin
+        for origin in (value.strip() for value in configured.split(","))
+        if origin and origin != "*" and origin not in origins
+    )
+    return origins
+
+
+cors_origins = build_cors_origins(os.getenv("CORS_ORIGINS", ""))
 CORS(app, resources={r"/api/*": {"origins": cors_origins}})
 
 HYDERABAD_POINT = (17.3850, 78.4867)

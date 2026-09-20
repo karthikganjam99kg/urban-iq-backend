@@ -244,6 +244,17 @@ class DataContractTests(unittest.TestCase):
         )
         self.assertNotIn("Access-Control-Allow-Origin", response.headers)
 
+    def test_cors_wildcard_configuration_is_ignored(self):
+        origins = app_module.build_cors_origins(
+            "*,https://preview.example.com"
+        )
+        self.assertNotIn("*", origins)
+        self.assertIn("https://preview.example.com", origins)
+        self.assertIn(
+            "https://hyderabad-urban-intelligence.vercel.app",
+            origins,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
