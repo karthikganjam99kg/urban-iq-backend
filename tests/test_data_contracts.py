@@ -242,6 +242,7 @@ class DataContractTests(unittest.TestCase):
                 "Access-Control-Request-Method": "GET",
             },
         )
+        self.assertEqual(response.status_code, 403)
         self.assertNotIn("Access-Control-Allow-Origin", response.headers)
 
     def test_cors_wildcard_configuration_is_ignored(self):

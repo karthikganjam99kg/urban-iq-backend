@@ -502,6 +502,18 @@ def build_cors_origins(configured=""):
 cors_origins = build_cors_origins(os.getenv("CORS_ORIGINS", ""))
 CORS(app, resources={r"/api/*": {"origins": cors_origins}})
 
+
+@app.before_request
+def reject_unapproved_browser_origins():
+    origin = request.headers.get("Origin")
+    if (
+        origin
+        and request.path.startswith("/api/")
+        and origin not in cors_origins
+    ):
+        return jsonify({"error": "Origin is not allowed."}), 403
+
+
 HYDERABAD_POINT = (17.3850, 78.4867)
 _last_traffic_persist = 0
 _traffic_cache = {"payload": None, "fetched_at": 0.0}
