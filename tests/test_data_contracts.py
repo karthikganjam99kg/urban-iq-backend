@@ -67,6 +67,64 @@ class DataContractTests(unittest.TestCase):
         self.assertEqual(result["data_quality"]["buses_observed"], 1)
         self.assertEqual(result["routes"][0]["bus_id"], "HYD-BUS-001")
 
+    def test_demand_uses_only_the_recent_rolling_window(self):
+        now = datetime.now(timezone.utc)
+        recent_offsets = (35, 28, 21, 14, 7, 0)
+        rows = [
+            {
+                "bus_id": "HYD-BUS-001",
+                "person_count": count,
+                "vehicle_count": 1,
+                "recorded_at": (now - timedelta(minutes=offset)).isoformat(),
+                "source": "test",
+            }
+            for offset, count in zip(recent_offsets, (10, 12, 14, 16, 18, 20))
+        ]
+        rows.append(
+            {
+                "bus_id": "HYD-BUS-001",
+                "person_count": 99,
+                "vehicle_count": 1,
+                "recorded_at": (now - timedelta(hours=5)).isoformat(),
+                "source": "old-test",
+            }
+        )
+
+        def supabase_request(_method, table, **_kwargs):
+            if table == "vehicle_density":
+                return rows
+            if table == "buses":
+                return [{"bus_id": "HYD-BUS-001", "route_id": "R001"}]
+            raise AssertionError(f"Unexpected table: {table}")
+
+        with (
+            patch.object(app_module, "supabase_request", side_effect=supabase_request),
+            patch.object(
+                app_module,
+                "optional_supabase_rows",
+                return_value=[{"bus_id": "HYD-BUS-001", "route_id": "R001"}],
+            ),
+        ):
+            result = app_module.fetch_demand_forecast()
+
+        route = result["routes"][0]
+        self.assertEqual(result["status"], "live")
+        self.assertEqual(route["observations"], 6)
+        self.assertEqual(route["coverage_minutes"], 35)
+        self.assertEqual(result["data_quality"]["minute_buckets"], 6)
+        self.assertEqual(result["data_quality"]["lookback_minutes"], 60)
+
+    def test_demand_projection_does_not_fall_below_recent_observations(self):
+        start = datetime.now(timezone.utc) - timedelta(minutes=35)
+        points = [
+            (start + timedelta(minutes=index * 7), count)
+            for index, count in enumerate((31, 29, 27, 25, 23, 21))
+        ]
+
+        prediction, _fit_score = app_module.linear_demand_prediction(points)
+
+        self.assertEqual(prediction, 21)
+
     def test_routes_score_two_fresh_signals_without_waterlogging(self):
         observed_at = datetime.now(timezone.utc).isoformat()
         routes = [

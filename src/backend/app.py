@@ -5,7 +5,7 @@ import uuid
 import time
 import tempfile
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -618,7 +618,7 @@ def parse_timestamp(value):
 
 
 def linear_demand_prediction(points, horizon_minutes=60):
-    """Fit a small rolling linear model to minute-level YOLO person counts."""
+    """Fit a guarded rolling linear model to minute-level YOLO person counts."""
     first_time = points[0][0]
     x_values = [(stamp - first_time).total_seconds() / 60 for stamp, _ in points]
     y_values = [count for _, count in points]
@@ -636,7 +636,20 @@ def linear_demand_prediction(points, horizon_minutes=60):
     )
     intercept = y_mean - slope * x_mean
     target_x = x_values[-1] + horizon_minutes
-    prediction = max(0, min(100, intercept + slope * target_x))
+    raw_prediction = intercept + slope * target_x
+    observed_min = min(y_values)
+    observed_max = max(y_values)
+    observed_range = observed_max - observed_min
+    # A short straight-line trend should not collapse below every recent
+    # observation or explode far beyond the observed range. This remains a
+    # demand proxy, but the guardrail makes its one-hour extrapolation
+    # conservative and explainable.
+    prediction_floor = max(0, observed_min)
+    prediction_ceiling = min(100, observed_max + max(5, observed_range))
+    prediction = max(
+        prediction_floor,
+        min(prediction_ceiling, raw_prediction),
+    )
 
     total_variance = sum((value - y_mean) ** 2 for value in y_values)
     residual_variance = sum(
@@ -716,8 +729,16 @@ def fetch_demand_forecast():
         grouped_by_bus[bus_id].append((minute, sum(values) / len(values)))
 
     route_forecasts = []
-    for bus_id, points in grouped_by_bus.items():
-        points.sort(key=lambda item: item[0])
+    recent_bucket_count = 0
+    lookback_minutes = 60
+    for bus_id, all_points in grouped_by_bus.items():
+        all_points.sort(key=lambda item: item[0])
+        latest_point = all_points[-1][0]
+        window_start = latest_point - timedelta(minutes=lookback_minutes)
+        points = [
+            point for point in all_points if point[0] >= window_start
+        ]
+        recent_bucket_count += len(points)
         coverage_minutes = (
             (points[-1][0] - points[0][0]).total_seconds() / 60
             if len(points) > 1
@@ -770,10 +791,11 @@ def fetch_demand_forecast():
     quality = {
         "raw_frames": eligible_frames,
         "excluded_frames": len(rows) - eligible_frames,
-        "minute_buckets": len(minute_values),
+        "minute_buckets": recent_bucket_count,
         "buses_observed": len(grouped_by_bus),
         "latest_observation": latest_stamp,
         "minimum_required": "6 minute buckets over 30 minutes; latest within 30 minutes",
+        "lookback_minutes": lookback_minutes,
         "signal": "YOLO person_count demand proxy",
     }
 
